@@ -204,6 +204,7 @@ ALIASES = {
     "?": "help", "r": "restart", "l": "logs", "t": "transfer", "b": "backup",
     "m": "monitor", "cfg": "config", "v": "version", "st": "stats",
     "proc": "processes", "repo": "repos", "up": "update", "cl": "clean",
+    "i": "init",
     "tr": "transfer",
 }
 
@@ -1061,6 +1062,7 @@ class OmniCore:
         bullet("omni repos     - Show repository status", C.PRIMARY)
         bullet("omni processes - Show PM2 processes", C.PRIMARY)
         bullet("omni install   - Show portable install guide", C.PRIMARY)
+        bullet("omni init      - Create missing local config/runtime files", C.PRIMARY)
         bullet("omni sync      - Pull snapshots from configured servers", C.PRIMARY)
         bullet("omni inventory - Classify host state vs. secrets vs. noise", C.PRIMARY)
         bullet("omni bundle-create - Export production-clean state bundle", C.PRIMARY)
@@ -1099,18 +1101,68 @@ class OmniCore:
 
         hr()
         bullet("Migration: inventory -> bundle -> secrets -> reconcile -> timer", C.G3)
+        bullet("Quickstart: init -> install.sh --compose --sync --timer", C.G3)
         print("  " + q(C.G3, f"Omni Core v{OMNI_VERSION} '{OMNI_CODENAME}'"))
         print("  " + q(C.G3, "Run 'omni <command>' to execute"))
         print()
+
+    def init_workspace(self):
+        print_logo(compact=True)
+        render_help_overview()
+        section("Workspace Init")
+
+        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, LOG_DIR):
+            path.mkdir(parents=True, exist_ok=True)
+
+        template_pairs = [
+            (OMNI_HOME / ".env", OMNI_HOME / ".env.example"),
+            (CONFIG_DIR / "repos.json", CONFIG_DIR / "repos.example.json"),
+            (CONFIG_DIR / "servers.json", CONFIG_DIR / "servers.example.json"),
+            (CONFIG_DIR / "system_manifest.json", CONFIG_DIR / "system_manifest.example.json"),
+        ]
+
+        created: List[Path] = []
+        existing: List[Path] = []
+        missing_templates: List[Path] = []
+
+        for target, template in template_pairs:
+            if target.exists():
+                existing.append(target)
+                continue
+            if template.exists():
+                shutil.copy2(template, target)
+                created.append(target)
+            else:
+                missing_templates.append(template)
+
+        if not TASKS_FILE.exists():
+            TASKS_FILE.write_text("[]\n", encoding="utf-8")
+            created.append(TASKS_FILE)
+        else:
+            existing.append(TASKS_FILE)
+
+        for path in created:
+            ok(f"Created {path}")
+        for path in existing:
+            dim(f"Already present: {path}")
+        for path in missing_templates:
+            warn(f"Template not found: {path}")
+
+        nl()
+        bullet("Next steps", C.PRIMARY, bold=True)
+        dim("1. Edit .env and config/*.json if needed")
+        dim("2. Run ./install.sh --compose --sync --timer")
+        dim("3. Validate with omni status and omni inventory")
+        nl()
 
     def show_install_guide(self):
         print_logo(tagline=False)
         render_help_overview()
         section("Portable Install")
-        bullet("1. Copy this folder to the target server", C.GRN)
-        bullet("2. Run: cp .env.example .env", C.GRN)
+        bullet("1. Copy or clone this folder to the target server", C.GRN)
+        bullet("2. Run: omni init", C.GRN)
         bullet("3. Edit .env, config/repos.json, config/servers.json and system_manifest.json", C.GRN)
-        bullet("4. Run: ./install.sh --compose", C.GRN)
+        bullet("4. Run: ./install.sh --compose --sync --timer", C.GRN)
         bullet("5. Export state: omni bundle-create", C.GRN)
         bullet("6. Export secrets: omni secrets-export", C.GRN)
         bullet("7. Rebuild host: omni reconcile --bundle-latest --secrets-latest", C.GRN)
@@ -1571,6 +1623,8 @@ def main():
         core.show_processes()
     elif action == "install":
         core.show_install_guide()
+    elif action == "init":
+        core.init_workspace()
     elif action == "sync":
         core.sync_remote_servers()
     elif action == "inventory":
