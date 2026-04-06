@@ -2,9 +2,11 @@
 config/repos.json
 config/servers.json
 config/system_manifest.json
+config/omni_agent.json
 logs/omni.log
 backups/
 data/servers/
+data/watch_snapshot.json
 src/__pycache__/
 tests/__pycache__/
 **/__pycache__/

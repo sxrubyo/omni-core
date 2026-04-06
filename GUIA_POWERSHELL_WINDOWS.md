@@ -7,7 +7,7 @@ La experiencia nueva recomendada es:
 1. PowerShell entra al Linux remoto
 2. Linux instala `omni-core`
 3. tú usas `omni` o `omni start`
-4. eliges `bridge`, `capture`, `restore`, `migrate` o `doctor`
+4. eliges `bridge`, `capture`, `restore`, `migrate`, `doctor` o `agent`
 5. si quieres llevarte todo `/home/ubuntu`, activas `omni init --profile full-home`
 
 ## Qué entra cuando usas `full-home`
@@ -35,6 +35,8 @@ Cuando el host ya tiene `capture summary`, Omni puede trabajar mucho más solo:
 - `omni rewrite-ip --apply` sigue disponible si quieres forzarlo a mano
 - `omni init`, `omni restore`, `omni migrate` y `omni rewrite-ip --apply` dejan backup automático en `backups/auto-bundles`
 - el timer diario también corre backup antes de `fix` y `sync`
+- `omni timer-install` deja también `omni-watch.service` para vigilar cambios del scope
+- `omni agent` abre el selector visual de proveedor para Claude, Gemini, OpenRouter, Qwen o endpoint compatible
 
 Si no quieres entrar en claves, `pem` o SSH remoto desde PowerShell, usa mejor esta guía:
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Omni Core change watcher and backup trigger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__OMNI_HOME__
+EnvironmentFile=-__OMNI_HOME__/.env
+ExecStart=/bin/bash -lc 'cd __OMNI_HOME__ && /usr/local/bin/omni watch --accept-all --interval ${OMNI_WATCH_INTERVAL:-120}'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

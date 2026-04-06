@@ -57,6 +57,8 @@ Y además:
 
 - `omni init`, `omni restore`, `omni migrate` y `omni rewrite-ip --apply` dejan backup automático en `backups/auto-bundles`
 - el timer diario ejecuta `omni backup`, luego `omni fix` y `omni sync`
+- `omni timer-install` deja también `omni-watch.service` para vigilar cambios del scope y disparar backup automático
+- `omni agent` abre el selector visual de proveedor para Claude, Gemini, OpenRouter, Qwen o endpoint compatible
 
 Tu caso correcto es este:
 

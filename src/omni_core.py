@@ -9,6 +9,7 @@ import sys
 import os
 import json
 import time
+import getpass
 import threading
 import random
 import argparse
@@ -27,6 +28,7 @@ from bundle_ops import (
     latest_or_explicit,
     restore_bundle,
 )
+from agent_ops import env_has_value, get_provider, load_agent_config, provider_catalog, save_agent_config, upsert_env_value
 from bridge_ops import (
     build_host_rewrite_context,
     load_capture_summary,
@@ -48,7 +50,8 @@ from host_inventory import (
 from ip_rewrite_ops import apply_rewrite_plan, build_rewrite_plan, detect_host_identity, preview_rewrite_plan
 from onboarding_ops import build_flow_options, normalize_flow_choice, should_accept_all
 from platform_ops import detect_platform_info
-from reconcile_ops import install_systemd_timer, reconcile_host
+from reconcile_ops import install_systemd_service, install_systemd_timer, reconcile_host
+from watch_ops import capture_watch_snapshot, load_watch_snapshot, save_watch_snapshot, summarize_snapshot_diff
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -59,7 +62,9 @@ BACKUP_DIR = Path(os.environ.get("OMNI_BACKUP_DIR", OMNI_HOME / "backups")).reso
 BUNDLE_DIR = Path(os.environ.get("OMNI_BUNDLE_DIR", BACKUP_DIR / "host-bundles")).resolve()
 AUTO_BUNDLE_DIR = Path(os.environ.get("OMNI_AUTO_BUNDLE_DIR", BACKUP_DIR / "auto-bundles")).resolve()
 LOG_DIR = Path(os.environ.get("OMNI_LOG_DIR", OMNI_HOME / "logs")).resolve()
+WATCH_STATE_FILE = Path(os.environ.get("OMNI_WATCH_STATE_FILE", STATE_DIR / "watch_snapshot.json")).resolve()
 ENV_FILE = Path(os.environ.get("OMNI_ENV_FILE", OMNI_HOME / ".env")).resolve()
+AGENT_CONFIG_FILE = Path(os.environ.get("OMNI_AGENT_CONFIG_FILE", CONFIG_DIR / "omni_agent.json")).resolve()
 TASKS_FILE = Path(os.environ.get("OMNI_TASKS_FILE", OMNI_HOME / "tasks.json")).resolve()
 REPOS_FILE = Path(os.environ.get("OMNI_REPOS_FILE", CONFIG_DIR / "repos.json")).resolve()
 SERVERS_FILE = Path(os.environ.get("OMNI_SERVERS_FILE", CONFIG_DIR / "servers.json")).resolve()
@@ -68,6 +73,7 @@ SYSTEM_MANIFEST_FILE = Path(
 ).resolve()
 AUTO_BACKUP_ON_CHANGE = os.environ.get("OMNI_AUTO_BACKUP_ON_CHANGE", "1").strip().lower() in {"1", "true", "yes", "on"}
 AUTO_BACKUP_KEEP = max(1, int(os.environ.get("OMNI_AUTO_BACKUP_KEEP", "5")))
+WATCH_BACKUP_COOLDOWN = max(30, int(os.environ.get("OMNI_WATCH_BACKUP_COOLDOWN", "600")))
 
 
 def load_env_file(env_path: Path) -> None:
@@ -1333,14 +1339,72 @@ class OmniCore:
             print(f"UPDATES: {u.get('message', 'None')}")
         print("="*60 + "\n")
 
-    def watch_mode(self, interval=300):
+    def watch_mode(
+        self,
+        interval: int = 300,
+        *,
+        manifest_path: str = "",
+        home_root: str = "",
+        profile: str = "",
+    ):
         logger = logging.getLogger("omni.core")
-        logger.info(f"Starting Omni Core Watch Mode (Interval: {interval}s)")
+        print_logo(compact=True)
+        section("Watch Mode")
+
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
+        watch_state_path = WATCH_STATE_FILE
+        previous = load_watch_snapshot(watch_state_path)
+        current = capture_watch_snapshot(manifest, manifest.get("host_root", home_root or str(Path.home())))
+        save_watch_snapshot(watch_state_path, current)
+        last_backup_at = 0.0
+
+        kv("Manifest", str(selected_path), color=C.GRN)
+        kv("Profile", manifest.get("profile", DEFAULT_PROFILE), color=C.GRN)
+        kv("Host Root", manifest.get("host_root", str(Path.home())), color=C.GRN)
+        kv("Watch State", str(watch_state_path), color=C.GRN)
+        kv("Baseline", f"{current.get('file_count', 0)} files · {human_size(int(current.get('total_size_bytes', 0)))}", color=C.GRN)
+        kv("Interval", f"{interval}s", color=C.GRN)
+        kv("Backup Cooldown", f"{WATCH_BACKUP_COOLDOWN}s", color=C.GRN)
+        nl()
+
+        if previous and previous.get("fingerprint") != current.get("fingerprint"):
+            diff = summarize_snapshot_diff(previous, current)
+            warn(f"Detected {diff['changed_files']} pending changes since last watch snapshot")
+            for sample in diff.get("samples", [])[:6]:
+                bullet(sample, C.YLW)
+            nl()
+
+        info("Watching managed paths for file changes. Ctrl+C to stop.")
+        logger.info("Starting Omni Core watch mode", extra={"interval": interval, "profile": manifest.get("profile")})
+
         try:
             while True:
-                self.run_full_fix()
-                time.sleep(interval)
+                time.sleep(max(5, interval))
+                next_snapshot = capture_watch_snapshot(manifest, manifest.get("host_root", home_root or str(Path.home())))
+                diff = summarize_snapshot_diff(current, next_snapshot)
+                if not diff.get("changed"):
+                    current = next_snapshot
+                    continue
+
+                warn(
+                    f"Detected {diff['changed_files']} file changes "
+                    f"(+{diff['added']} / ~{diff['modified']} / -{diff['removed']})"
+                )
+                for sample in diff.get("samples", [])[:8]:
+                    bullet(sample, C.YLW)
+
+                now = time.time()
+                if now - last_backup_at >= WATCH_BACKUP_COOLDOWN:
+                    self.run_backup(profile=manifest.get("profile", DEFAULT_PROFILE))
+                    last_backup_at = now
+                else:
+                    remaining = int(WATCH_BACKUP_COOLDOWN - (now - last_backup_at))
+                    hint(f"Backup cooldown active. Next automatic backup in ~{remaining}s.")
+                save_watch_snapshot(watch_state_path, next_snapshot)
+                current = next_snapshot
+                nl()
         except KeyboardInterrupt:
+            info("Watch mode stopped.")
             logger.info("Watch mode stopped.")
 
     def show_status(self):
@@ -1441,15 +1505,156 @@ class OmniCore:
         kv("Repos File", str(REPOS_FILE))
         kv("Manifest", str(self.manifest_path))
         kv("Bundle Dir", str(self.bundle_dir))
+        kv("Agent Config", str(AGENT_CONFIG_FILE))
         kv("Logs", str(LOG_DIR / "omni.log"))
         kv("Repos", str(len(self.repos)))
         kv("Telegram", "configured" if os.getenv("OMNI_TELEGRAM_TOKEN") else "not configured")
+        agent_config = load_agent_config(AGENT_CONFIG_FILE)
+        if agent_config:
+            kv("Agent Provider", str(agent_config.get("provider", "unknown")), color=C.GRN)
         nl()
 
         if self.tasks:
             bullet("Tasks:", C.G3)
             for task in self.tasks:
                 dim("  • " + task.get("name", "Unnamed"))
+
+    def show_agent_status(self):
+        print_logo(compact=True)
+        section("Omni Agent")
+        config = load_agent_config(AGENT_CONFIG_FILE)
+        if not config:
+            warn("Omni Agent todavía no está configurado.")
+            hint("Usa `omni agent` para elegir proveedor y guardar la configuración.")
+            return
+
+        provider = get_provider(str(config.get("provider", "")))
+        title = provider.title if provider else str(config.get("provider_title", config.get("provider", "unknown")))
+        env_var = str(config.get("env_var", ""))
+        kv("Provider", title, color=C.GRN)
+        kv("Protocol", str(config.get("protocol", "unknown")), color=C.GRN)
+        kv("Model", str(config.get("model", "unknown")), color=C.GRN)
+        kv("Base URL", str(config.get("base_url", "unknown")), color=C.GRN)
+        kv("Env Var", env_var or "none", color=C.GRN)
+        kv("Secret", "loaded" if env_var and env_has_value(ENV_FILE, env_var) else "missing", color=C.GRN if env_var and env_has_value(ENV_FILE, env_var) else C.YLW)
+        if config.get("docs_url"):
+            kv("Docs", str(config.get("docs_url")), color=C.GRN)
+        if config.get("notes"):
+            dim(str(config.get("notes")))
+        nl()
+
+    def agent_cmd(self, subaction: str = "", *, accept_all: bool = False):
+        normalized = str(subaction or "").strip().lower()
+        if normalized in {"status", "show"}:
+            self.show_agent_status()
+            return
+
+        print_logo(compact=True)
+        section("Omni Agent")
+        current = load_agent_config(AGENT_CONFIG_FILE)
+        if current:
+            info("Configuración actual detectada.")
+            provider = get_provider(str(current.get("provider", "")))
+            kv("Provider", provider.title if provider else str(current.get("provider", "unknown")), color=C.GRN)
+            kv("Model", str(current.get("model", "unknown")), color=C.GRN)
+            kv("Base URL", str(current.get("base_url", "unknown")), color=C.GRN)
+            nl()
+
+        if accept_all or not self.is_interactive():
+            warn("Omni Agent necesita un terminal interactivo para configurarse.")
+            if current:
+                hint("Mostrando configuración actual en vez de modificarla.")
+                self.show_agent_status()
+            else:
+                hint("Usa `omni agent` desde una terminal interactiva para elegir proveedor y guardar claves.")
+            return
+
+        providers = provider_catalog()
+        default_idx = 0
+        if current:
+            default_idx = next((idx for idx, item in enumerate(providers) if item.key == current.get("provider")), 0)
+
+        selected = select_menu(
+            [item.title for item in providers],
+            title="¿Qué proveedor quieres usar para Omni Agent?",
+            descriptions=[item.description for item in providers],
+            icons=["🧠", "✨", "🔁", "🌐", "🈶", "🛠️"],
+            default=default_idx,
+            show_index=True,
+            footer="↑/↓ elegir proveedor · Enter confirmar · número salto directo",
+        )
+
+        provider = providers[selected]
+        base_url = provider.base_url
+        env_var = provider.env_var
+
+        if provider.requires_custom_base_url and self.is_interactive():
+            raw_base = input(f"Base URL [{provider.base_url}]: ").strip()
+            if raw_base:
+                base_url = raw_base
+        if provider.requires_custom_env_var and self.is_interactive():
+            raw_env = input(f"Variable para API key [{provider.env_var}]: ").strip().upper()
+            if raw_env:
+                env_var = raw_env
+
+        model_choices = list(provider.sample_models) + ["Custom"]
+        model_default_idx = 0
+        if current and current.get("provider") == provider.key and current.get("model") in model_choices:
+            model_default_idx = model_choices.index(str(current.get("model")))
+        model_idx = select_menu(
+            model_choices,
+            title=f"Modelo por defecto para {provider.title}",
+            descriptions=[
+                "Modelo recomendado para empezar." if choice == provider.default_model else (
+                    "Escribe tu modelo exacto a mano." if choice == "Custom" else "Opción disponible."
+                )
+                for choice in model_choices
+            ],
+            icons=["•"] * len(model_choices),
+            default=model_default_idx,
+            show_index=True,
+            footer="↑/↓ elegir modelo · Enter confirmar · número salto directo",
+        )
+        if model_choices[model_idx] == "Custom":
+            custom_model = input(f"Modelo personalizado [{provider.default_model}]: ").strip()
+            model = custom_model or provider.default_model
+        else:
+            model = model_choices[model_idx]
+
+        wrote_secret = False
+        if self.is_interactive():
+            raw_key = getpass.getpass(f"API key para {provider.title} (Enter para omitir): ").strip()
+            if raw_key:
+                upsert_env_value(ENV_FILE, env_var, raw_key)
+                os.environ[env_var] = raw_key
+                wrote_secret = True
+
+        payload = {
+            "provider": provider.key,
+            "provider_title": provider.title,
+            "protocol": provider.protocol,
+            "env_var": env_var,
+            "base_url": base_url,
+            "model": model,
+            "docs_url": provider.docs_url,
+            "notes": provider.notes,
+            "configured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        save_agent_config(AGENT_CONFIG_FILE, payload)
+
+        ok(f"Omni Agent configurado con {provider.title}")
+        render_action_summary(
+            "Omni Agent",
+            [
+                f"Provider: {provider.title}",
+                f"Protocol: {provider.protocol}",
+                f"Model: {model}",
+                f"Base URL: {base_url}",
+                f"Secret: {'guardado en .env' if wrote_secret else ('ya presente' if env_has_value(ENV_FILE, env_var) else 'pendiente')}",
+                f"Docs: {provider.docs_url}",
+            ],
+            accent=C.PRIMARY,
+        )
 
     def show_help(self):
         """Show help menu."""
@@ -1462,6 +1667,8 @@ class OmniCore:
         dim("Ideal desde PowerShell o una máquina con poco disco local.")
         bullet("Crear respaldo real  -> omni capture --profile full-home", C.GRN)
         dim("Luego saca `backups/host-bundles` fuera del host actual.")
+        bullet("Configurar Omni Agent  -> omni agent", C.GRN)
+        dim("Selector visual para Claude, Gemini, OpenRouter, Qwen o endpoint compatible.")
         nl()
 
         section("Omni Core - Command Reference")
@@ -1470,7 +1677,7 @@ class OmniCore:
         nl()
         bullet("omni check     - Run health check and report", C.GRN)
         bullet("omni fix       - Run full system fix", C.GRN)
-        bullet("omni watch     - Run in continuous mode", C.GRN)
+        bullet("omni watch     - Watch managed files and auto-backup on change", C.GRN)
         bullet("omni status    - Show system status", C.GRN)
         bullet("omni logs      - View Omni logs", C.GRN)
         bullet("omni doctor    - Run the guided health and recovery audit", C.GRN)
@@ -1502,8 +1709,9 @@ class OmniCore:
         bullet("omni reconcile - Rebuild host from manifest + bundles", C.PRIMARY)
         bullet("omni detect-ip - Detect current host identity", C.PRIMARY)
         bullet("omni rewrite-ip - Rewrite old host references safely", C.PRIMARY)
+        bullet("omni agent     - Configure Omni Agent provider and model", C.PRIMARY)
         bullet("omni bridge    - Create/send/receive migration packs", C.PRIMARY)
-        bullet("omni timer-install - Install daily maintenance timer", C.PRIMARY)
+        bullet("omni timer-install - Install daily timer + change watcher service", C.PRIMARY)
         bullet("omni purge - Delete transferred state and repo artifacts to free disk", C.PRIMARY)
         nl()
 
@@ -1683,7 +1891,7 @@ class OmniCore:
         else:
             recommended_idx = next((idx for idx, option in enumerate(flow_options) if option.recommended), 0)
             labels = [option.title for option in flow_options]
-            icons = ["🛫", "📦", "♻️", "🚚", "🩺", "⚙️"]
+            icons = ["🛫", "📦", "♻️", "🚚", "🩺", "🧠", "⚙️"]
             descriptions = []
             for option in flow_options:
                 suffix = " Recomendado en este host." if option.recommended else ""
@@ -1722,6 +1930,9 @@ class OmniCore:
             return
         if chosen_flow == "doctor":
             self.show_doctor()
+            return
+        if chosen_flow == "agent":
+            self.agent_cmd(accept_all=effective_accept_all)
             return
         self.show_help()
 
@@ -2362,11 +2573,17 @@ class OmniCore:
 
     def install_timer_cmd(self, service_name: str = "omni-update", on_calendar: str = "daily"):
         print_logo(compact=True)
-        section("Daily Timer")
+        section("Maintenance Services")
         timer_data = install_systemd_timer(omni_home=OMNI_HOME, service_name=service_name, on_calendar=on_calendar)
+        watch_data = install_systemd_service(
+            omni_home=OMNI_HOME,
+            template_name="omni-watch.service",
+            service_name="omni-watch",
+        )
         ok(f"Installed {service_name}.timer")
         kv("Service", timer_data["service"], color=C.GRN)
         kv("Timer", timer_data["timer"], color=C.GRN)
+        kv("Watch Service", watch_data["service"], color=C.GRN)
 
     def purge_cmd(
         self,
@@ -2676,7 +2893,12 @@ def main():
         elif action == "fix":
             core.run_full_fix()
         elif action == "watch":
-            core.watch_mode(args.interval)
+            core.watch_mode(
+                args.interval,
+                manifest_path=args.manifest,
+                home_root=args.home_root,
+                profile=args.profile,
+            )
         elif action == "status":
             core.show_status()
         elif action == "doctor":
@@ -2759,6 +2981,9 @@ def main():
                 accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
                 context_lines=args.context_lines,
             )
+        elif action == "agent":
+            agent_action = remaining[0] if remaining else ""
+            core.agent_cmd(agent_action, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
         elif action == "bridge":
             bridge_action = remaining[0] if remaining else ""
             if bridge_action in {"create", ""}:

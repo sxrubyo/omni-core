@@ -132,6 +132,8 @@ Además:
 
 - `omni init`, `omni restore`, `omni migrate` y `omni rewrite-ip --apply` crean backup automático en `backups/auto-bundles`
 - el timer diario `omni-update.timer` ahora ejecuta primero `omni backup`, luego `omni fix` y `omni sync`
+- `omni timer-install` deja también `omni-watch.service`, que vigila cambios en el scope del manifest y dispara backup automático con cooldown
+- `omni agent` abre un selector visual para configurar Claude, Gemini, OpenRouter, Qwen o un endpoint OpenAI-compatible propio
 
 ## Modos de instalación
 
@@ -323,6 +325,7 @@ omni
 5. validar `omni doctor`
 6. revisar `omni detect-ip`
 7. si hace falta, ejecutar `omni rewrite-ip`
+8. si quieres IA operativa en el host, ejecutar `omni agent`
 
 ## Liberar espacio
 

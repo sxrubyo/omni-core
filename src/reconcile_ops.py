@@ -233,6 +233,42 @@ def install_systemd_timer(
     return {"service": str(service_path), "timer": str(timer_path)}
 
 
+def install_systemd_service(
+    *,
+    omni_home: Path,
+    template_name: str,
+    service_name: str,
+) -> Dict[str, Any]:
+    systemd_dir = Path("/etc/systemd/system")
+    service_template = omni_home / "config" / "systemd" / template_name
+    if not service_template.exists():
+        raise FileNotFoundError(f"Missing systemd template file: {template_name}")
+
+    service_text = service_template.read_text(encoding="utf-8").replace("__OMNI_HOME__", str(omni_home))
+    service_path = systemd_dir / f"{service_name}.service"
+    writer = ["tee"]
+    daemon_reload = ["systemctl", "daemon-reload"]
+    enable_service = ["systemctl", "enable", "--now", f"{service_name}.service"]
+    if os.geteuid() != 0:
+        writer.insert(0, "sudo")
+        daemon_reload.insert(0, "sudo")
+        enable_service.insert(0, "sudo")
+
+    result = subprocess.run(writer + [str(service_path)], input=service_text, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to write {service_path}")
+
+    reload_result = subprocess.run(daemon_reload, capture_output=True, text=True, check=False)
+    if reload_result.returncode != 0:
+        raise RuntimeError(reload_result.stderr.strip() or reload_result.stdout.strip() or "systemctl daemon-reload failed")
+
+    enable_result = subprocess.run(enable_service, capture_output=True, text=True, check=False)
+    if enable_result.returncode != 0:
+        raise RuntimeError(enable_result.stderr.strip() or enable_result.stdout.strip() or "systemctl enable service failed")
+
+    return {"service": str(service_path)}
+
+
 def reconcile_host(
     manifest: Dict[str, Any],
     *,
