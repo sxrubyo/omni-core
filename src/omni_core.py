@@ -207,12 +207,14 @@ def build_remote_sync_command(
     ssh_dir: Path | None = None,
     env: Optional[Dict[str, str]] = None,
     delete: bool = True,
+    extra_excludes: Optional[List[str]] = None,
 ) -> str:
     user = str(server.get("user", "ubuntu"))
     host = str(server.get("host", "")).strip()
     port = int(server.get("port", 22))
     protocol = str(server.get("protocol", "rsync")).strip().lower()
     excludes = [str(pattern) for pattern in server.get("excludes", []) or [] if str(pattern).strip()]
+    excludes.extend(str(pattern) for pattern in (extra_excludes or []) if str(pattern).strip())
     identity_file = resolve_server_identity_file(server, ssh_dir=ssh_dir, env=env)
 
     if protocol == "scp":
@@ -1715,6 +1717,25 @@ class OmniCore:
 
             for remote_path in paths:
                 destination = root / remote_path.lstrip("/")
+                extra_excludes: List[str] = []
+                try:
+                    omni_relative = OMNI_HOME.resolve().relative_to(destination.resolve())
+                    if omni_relative.parts:
+                        extra_excludes.append(str(Path(*omni_relative.parts).as_posix()))
+                    else:
+                        results.append({
+                            "server": name,
+                            "path": remote_path,
+                            "protocol": protocol,
+                            "success": True,
+                            "target": str(destination),
+                            "error": "",
+                            "output": "",
+                            "status": "skipped_omni_home",
+                        })
+                        continue
+                except ValueError:
+                    pass
                 destination.mkdir(parents=True, exist_ok=True)
                 cmd = build_remote_sync_command(
                     {
@@ -1729,6 +1750,7 @@ class OmniCore:
                     remote_path,
                     destination,
                     delete=False,
+                    extra_excludes=extra_excludes,
                 )
                 logger.info("Hydrating %s:%s into %s", name, remote_path, destination)
                 code, out, err = self._run_transfer_cmd_visible(

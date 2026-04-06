@@ -123,6 +123,16 @@ class MigrateFlowOpsTests(unittest.TestCase):
         reconcile_mock.assert_called_once()
         self.assertEqual(result["hydration_result"]["results"][0]["success"], True)
 
+    def test_hydrate_from_remote_servers_skips_remote_omni_home_target(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": [str(Path(core.root_dir))]}]
+
+        with mock.patch.object(core, "_run_transfer_cmd_visible") as transfer_mock:
+            result = core.hydrate_from_remote_servers(target_root="/")
+
+        transfer_mock.assert_not_called()
+        self.assertEqual(result["results"][0]["status"], "skipped_omni_home")
+
 
 if __name__ == "__main__":
     unittest.main()
