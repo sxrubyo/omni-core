@@ -41,7 +41,7 @@ from host_inventory import (
     scan_home,
 )
 from ip_rewrite_ops import apply_rewrite_plan, build_rewrite_plan, detect_host_identity, preview_rewrite_plan
-from onboarding_ops import build_flow_options, build_flow_prompt, normalize_flow_choice, should_accept_all
+from onboarding_ops import build_flow_options, normalize_flow_choice, should_accept_all
 from platform_ops import detect_platform_info
 from reconcile_ops import install_systemd_timer, reconcile_host
 
@@ -314,6 +314,201 @@ def box(title: str, lines: List[str], width: int = 72, accent: Optional[str] = N
         visible = line.ljust(inner_width)
         print("  " + q(C.G3, "│") + q(C.W, visible) + q(C.G3, "│"))
     print("  " + q(C.G3, bottom))
+
+
+def _is_tty() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def select_menu(
+    options: List[str],
+    *,
+    title: str = "",
+    descriptions: Optional[List[str]] = None,
+    icons: Optional[List[str]] = None,
+    default: int = 0,
+    show_index: bool = False,
+    page_size: int = 10,
+    footer: str = "",
+) -> int:
+    if not options:
+        return 0
+
+    descriptions = descriptions or []
+    icons = icons or []
+    default = max(0, min(default, len(options) - 1))
+
+    def fallback() -> int:
+        if title:
+            print(f"\n  {q(C.G2, title)}")
+        print(f"  {q(C.G3, 'Puedes moverte con ↑/↓ si el terminal lo soporta, o escribir el número.')}")
+        for idx, option in enumerate(options):
+            num = q(C.PRIMARY, f"{idx + 1}.", bold=True)
+            icon = f"{icons[idx]}  " if idx < len(icons) and icons[idx] else ""
+            current = q(C.B6, "•", bold=True) + "  " if idx == default else "   "
+            color = C.W if idx == default else C.G2
+            print(f"{current}{num}  {icon}{q(color, option, bold=idx == default)}")
+            if idx < len(descriptions) and descriptions[idx]:
+                print("       " + q(C.G3, descriptions[idx]))
+        try:
+            sys.stdout.write(f"\n  {q(C.PRIMARY, '→')}  ")
+            sys.stdout.flush()
+            answer = input("").strip()
+        except EOFError:
+            print()
+            return default
+        except KeyboardInterrupt:
+            print()
+            raise
+        if answer.isdigit():
+            numeric = int(answer) - 1
+            if 0 <= numeric < len(options):
+                return numeric
+        return default
+
+    if not _is_tty():
+        return fallback()
+
+    current = default
+    scroll_offset = 0
+
+    def draw(first: bool = False) -> None:
+        nonlocal scroll_offset
+        if current < scroll_offset:
+            scroll_offset = current
+        elif current >= scroll_offset + page_size:
+            scroll_offset = current - page_size + 1
+
+        visible = range(scroll_offset, min(len(options), scroll_offset + page_size))
+        out: List[str] = []
+        if not first:
+            out.append("\033[u\033[J")
+        else:
+            out.append("\033[s")
+
+        if title:
+            out.append("\n  " + q(C.G2, title) + "\n")
+            out.append("  " + q(C.G3, "Usa ↑/↓ y Enter. También puedes saltar con un número.") + "\n\n")
+
+        for idx in visible:
+            prefix = q(C.PRIMARY, f"{idx + 1}.", bold=True) + "  " if show_index else ""
+            icon = f"{icons[idx]}  " if idx < len(icons) and icons[idx] else ""
+            if idx == current:
+                out.append("  " + q(C.B6, "▸", bold=True) + "  " + prefix + icon + q(C.W, options[idx], bold=True) + "\n")
+            else:
+                out.append("     " + prefix + icon + q(C.G2, options[idx]) + "\n")
+
+            if idx < len(descriptions) and descriptions[idx]:
+                out.append("       " + q(C.G2 if idx == current else C.G3, descriptions[idx]) + "\n")
+
+        if scroll_offset > 0:
+            out.append("       " + q(C.G3, "↑ hay más arriba") + "\n")
+        if scroll_offset + page_size < len(options):
+            out.append("       " + q(C.G3, "↓ hay más abajo") + "\n")
+
+        out.append("\n")
+        out.append("  " + q(C.G3, footer or "↑/↓ seleccionar · j/k mover · Enter confirmar · número salto directo") + "\n")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    if IS_WINDOWS:
+        import msvcrt
+
+        draw(first=True)
+        while True:
+            ch = msvcrt.getch()
+            if ch in (b"\r", b"\n"):
+                return current
+            if ch == b"\x03":
+                raise KeyboardInterrupt
+            if ch in (b"\x00", b"\xe0"):
+                ch2 = msvcrt.getch()
+                if ch2 == b"H" and current > 0:
+                    current -= 1
+                    draw()
+                elif ch2 == b"P" and current < len(options) - 1:
+                    current += 1
+                    draw()
+                continue
+            try:
+                key = ch.decode(errors="ignore")
+            except Exception:
+                continue
+            if key in ("k", "K") and current > 0:
+                current -= 1
+                draw()
+            elif key in ("j", "J") and current < len(options) - 1:
+                current += 1
+                draw()
+            elif key.isdigit():
+                numeric = int(key) - 1
+                if 0 <= numeric < len(options):
+                    return numeric
+    else:
+        import os as _os
+        import select as _sel
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+
+        def read_key() -> str:
+            tty.setraw(fd)
+            try:
+                b = _os.read(fd, 1)
+                if b in (b"\r", b"\n"):
+                    termios.tcflush(fd, termios.TCIFLUSH)
+                    return "\r"
+                if b == b"\x03":
+                    return "\x03"
+                if b == b"\x1b":
+                    ready, _, _ = _sel.select([fd], [], [], 0.05)
+                    if not ready:
+                        return "\x1b"
+                    b2 = _os.read(fd, 1)
+                    if b2 == b"[":
+                        ready2, _, _ = _sel.select([fd], [], [], 0.05)
+                        if not ready2:
+                            return "["
+                        b3 = _os.read(fd, 1)
+                        if b3 == b"A":
+                            return "UP"
+                        if b3 == b"B":
+                            return "DOWN"
+                        return b3.decode(errors="ignore")
+                    return b2.decode(errors="ignore")
+                return b.decode(errors="ignore")
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        draw(first=True)
+        while True:
+            key = read_key()
+            if key == "\r":
+                return current
+            if key == "\x03":
+                raise KeyboardInterrupt
+            if key in ("UP", "k", "K") and current > 0:
+                current -= 1
+                draw()
+            elif key in ("DOWN", "j", "J") and current < len(options) - 1:
+                current += 1
+                draw()
+            elif key.isdigit():
+                numeric = int(key) - 1
+                if 0 <= numeric < len(options):
+                    return numeric
+
+    return current
+
+
+def render_action_summary(title: str, lines: List[str], *, accent: Optional[str] = None, width: int = 88):
+    clean_lines = [line for line in lines if line is not None]
+    box(title, clean_lines, width=min(width, max(72, TERM_WIDTH - 4)), accent=accent or C.PRIMARY)
 
 
 def render_help_overview():
@@ -756,26 +951,38 @@ class OmniCore:
             return FULL_HOME_PROFILE
         return DEFAULT_PROFILE
 
-    def choose_profile(self, requested: str = "", *, accept_all: bool = False) -> str:
-        resolved = self.normalize_profile(requested)
-        if requested or accept_all or not self.is_interactive():
+    def choose_profile(self, requested: str = "", *, accept_all: bool = False, current_profile: str = "") -> str:
+        requested_raw = (requested or "").strip()
+        resolved = self.normalize_profile(requested_raw)
+        if requested_raw or accept_all or not self.is_interactive():
             return resolved
 
-        current_profile = DEFAULT_PROFILE
-        if self.manifest_path.exists():
+        manifest_profile = current_profile or DEFAULT_PROFILE
+        if self.manifest_path.exists() and not current_profile:
             try:
-                current_profile = load_manifest(self.manifest_path, str(Path.home())).get("profile", DEFAULT_PROFILE)
+                manifest_profile = load_manifest(self.manifest_path, str(Path.home())).get("profile", DEFAULT_PROFILE)
             except Exception:
-                current_profile = DEFAULT_PROFILE
-        default_profile = self.normalize_profile(current_profile)
-
-        bullet("Scope", C.PRIMARY, bold=True)
-        dim("1. production-clean  -> restaura arquitectura curada, más liviana")
-        dim("2. full-home         -> captura/restaura TODO /home/ubuntu")
-        nl()
-
-        choice = self.prompt_text("Choose scope", default_profile)
-        return self.normalize_profile(choice)
+                manifest_profile = DEFAULT_PROFILE
+        default_profile = self.normalize_profile(manifest_profile)
+        options = ["production-clean", "full-home"]
+        descriptions = [
+            "Restaura arquitectura curada, más liviana y portable.",
+            "Captura y reconstruye TODO /home/ubuntu, con secretos separados.",
+        ]
+        icons = ["🧩", "🏠"]
+        try:
+            selected = select_menu(
+                options,
+                title="Elige el alcance de la migración",
+                descriptions=descriptions,
+                icons=icons,
+                default=options.index(default_profile) if default_profile in options else 0,
+                show_index=True,
+                footer="↑/↓ elegir alcance · Enter confirmar",
+            )
+        except KeyboardInterrupt:
+            raise
+        return self.normalize_profile(options[selected])
 
     def resolve_manifest(
         self,
@@ -842,19 +1049,31 @@ class OmniCore:
             return default
         suffix = f" [{default}]" if default else ""
         try:
-            answer = input(f"  {prompt}{suffix}: ").strip()
+            sys.stdout.write(f"\n  {q(C.PRIMARY, '?')}  {q(C.W, prompt)}{q(C.G3, suffix)}  ")
+            sys.stdout.flush()
+            answer = input("").strip()
         except EOFError:
+            print()
             return default
+        except KeyboardInterrupt:
+            print()
+            raise
         return answer or default
 
     def confirm_step(self, prompt: str, accept_all: bool = False, default: bool = True) -> bool:
         if accept_all or not self.is_interactive():
             return default
-        default_hint = "Y/n" if default else "y/N"
+        default_hint = "S/n" if default else "s/N"
         try:
-            answer = input(f"  {prompt} [{default_hint}]: ").strip().lower()
+            sys.stdout.write(f"\n  {q(C.PRIMARY, '?')}  {q(C.W, prompt)} {q(C.G3, f'[{default_hint}]')}  ")
+            sys.stdout.flush()
+            answer = input("").strip().lower()
         except EOFError:
+            print()
             return default
+        except KeyboardInterrupt:
+            print()
+            raise
         if not answer:
             return default
         return answer in {"y", "yes", "s", "si", "sí"}
@@ -1120,6 +1339,15 @@ class OmniCore:
         """Show help menu."""
         print_logo(tagline=True)
         render_help_overview()
+        section("Common Flows")
+        bullet("Mover todo /home/ubuntu  -> omni start -> Migrate", C.GRN)
+        dim("Omni restaura bundles, secretos, dependencias, compose y PM2.")
+        bullet("Usar esta terminal como puente  -> omni start -> Bridge", C.GRN)
+        dim("Ideal desde PowerShell o una máquina con poco disco local.")
+        bullet("Crear respaldo real  -> omni capture --profile full-home", C.GRN)
+        dim("Luego saca `backups/host-bundles` fuera del host actual.")
+        nl()
+
         section("Omni Core - Command Reference")
 
         print("  " + q(C.W, "CORE COMMANDS", bold=True))
@@ -1312,12 +1540,7 @@ class OmniCore:
         kv("Mode", "accept-all" if effective_accept_all else "guided", color=C.YLW if effective_accept_all else C.GRN)
         kv("Default Scope", profile, color=C.GRN)
         nl()
-
-        for option in build_flow_options(info_obj):
-            suffix = " (recommended)" if option.recommended else ""
-            bullet(f"{option.key}: {option.title}{suffix}", C.PRIMARY if option.recommended else C.G3, bold=option.recommended)
-            dim(option.description)
-        nl()
+        flow_options = build_flow_options(info_obj)
 
         if requested_flow:
             chosen_flow = requested_flow
@@ -1327,12 +1550,29 @@ class OmniCore:
             hint("Use an explicit command such as `omni capture --accept-all` or set OMNI_START_FLOW.")
             return
         else:
-            print("  " + q(C.G2, build_flow_prompt(info_obj)))
-            nl()
-            chosen_flow = normalize_flow_choice(self.prompt_text("Choose flow", "bridge"))
+            recommended_idx = next((idx for idx, option in enumerate(flow_options) if option.recommended), 0)
+            labels = [option.title for option in flow_options]
+            icons = ["🛫", "📦", "♻️", "🚚", "🩺", "⚙️"]
+            descriptions = []
+            for option in flow_options:
+                suffix = " Recomendado en este host." if option.recommended else ""
+                descriptions.append(option.description + suffix)
+            try:
+                selected = select_menu(
+                    labels,
+                    title="¿Qué quieres hacer primero?",
+                    descriptions=descriptions,
+                    icons=icons,
+                    default=recommended_idx,
+                    show_index=True,
+                    footer="↑/↓ elegir flujo · Enter confirmar · número salto directo",
+                )
+            except KeyboardInterrupt:
+                raise
+            chosen_flow = flow_options[selected].key
 
         if chosen_flow in {"bridge", "capture", "restore", "migrate"}:
-            profile = self.choose_profile(profile, accept_all=effective_accept_all)
+            profile = self.choose_profile(accept_all=effective_accept_all, current_profile=profile)
 
         if chosen_flow == "advanced":
             self.show_help()
@@ -1435,7 +1675,27 @@ class OmniCore:
             warn("No passphrase configured. Secrets bundle was exported without encryption.")
 
         summary = summarize_bundle_pair(bundle_dir=bundle_dir, state_bundle=str(state_bundle), secrets_bundle=str(secrets_bundle))
-        self.write_json_output(summary)
+        if self.is_interactive():
+            summary_lines = [
+                f"Perfil activo: {manifest.get('profile', DEFAULT_PROFILE)}",
+                f"Bundle de estado: {state_bundle}",
+                f"Bundle de secretos: {secrets_bundle}",
+                f"Resumen: {summary_path}",
+                f"Directorio: {bundle_dir}",
+            ]
+            if not passphrase:
+                summary_lines.append("Atención: el bundle de secretos quedó sin cifrar.")
+            summary_lines.extend(
+                [
+                    "",
+                    "Siguiente paso recomendado:",
+                    "$ omni bridge",
+                    "$ ls -lah /home/ubuntu/omni-core/backups/host-bundles",
+                ]
+            )
+            render_action_summary("Capture listo", summary_lines, accent=C.GRN)
+        else:
+            self.write_json_output(summary)
 
     def restore_host_cmd(
         self,
@@ -1450,6 +1710,7 @@ class OmniCore:
         install_timer: bool = False,
         on_calendar: str = "daily",
         profile: str = "",
+        show_summary: bool = True,
     ):
         print_logo(compact=True)
         section("Restore Host")
@@ -1478,10 +1739,34 @@ class OmniCore:
             repos=self.repo_entries,
         )
         ok(f"Restore completed using {selected_path}")
-        self.write_json_output(report)
-
+        timer_installed = False
         if install_timer and self.confirm_step("Install daily Omni timer?", accept_all=accept_all):
             self.install_timer_cmd("omni-update", on_calendar)
+            timer_installed = True
+
+        if show_summary and self.is_interactive():
+            step_map = {step.get("name"): step for step in report.get("steps", []) if isinstance(step, dict)}
+            restore_state = step_map.get("restore_state", {})
+            restore_secrets = step_map.get("restore_secrets", {})
+            compose_step = step_map.get("compose", {})
+            compose_started = len([item for item in compose_step.get("results", []) if item.get("status") == "started"])
+            pm2_step = step_map.get("pm2", {})
+            summary_lines = [
+                f"Perfil activo: {manifest.get('profile', DEFAULT_PROFILE)}",
+                f"Archivos de estado restaurados: {restore_state.get('restored', 0)}",
+                f"Archivos de secretos restaurados: {restore_secrets.get('restored', 0)}",
+                f"Proyectos Compose levantados: {compose_started}",
+                f"PM2: {pm2_step.get('status', 'sin estado')}",
+                f"Timer diario: {'instalado' if timer_installed else 'pendiente'}",
+                "",
+                "Siguiente paso recomendado:",
+                "$ omni status",
+                "$ omni inventory",
+                "$ omni detect-ip",
+            ]
+            render_action_summary("Restore completo", summary_lines, accent=C.GRN)
+        else:
+            self.write_json_output(report)
 
     def detect_ip_cmd(self):
         print_logo(compact=True)
@@ -1583,6 +1868,8 @@ class OmniCore:
         kv("Detected Platform", f"{info_obj.system} / {info_obj.shell} / {info_obj.package_manager}", color=C.GRN)
         nl()
 
+        rewrite_applied = False
+
         self.restore_host_cmd(
             manifest_path=manifest_path,
             home_root=home_root,
@@ -1594,10 +1881,26 @@ class OmniCore:
             install_timer=install_timer,
             on_calendar=on_calendar,
             profile=profile,
+            show_summary=False,
         )
 
         if apply_rewrite and self.confirm_step("Detect and rewrite old host references to this host?", accept_all=accept_all):
             self.rewrite_ip_cmd(root=home_root or str(Path.home()), apply_changes=True, accept_all=True)
+            rewrite_applied = True
+
+        if self.is_interactive():
+            lines = [
+                f"Plataforma detectada: {info_obj.system} / {info_obj.shell}",
+                f"Reescritura de referencias: {'aplicada' if rewrite_applied else 'no aplicada'}",
+                "",
+                "Validación inmediata:",
+                "$ omni status",
+                "$ omni inventory",
+                "$ omni detect-ip",
+            ]
+            if not rewrite_applied:
+                lines.append("$ omni rewrite-ip --apply")
+            render_action_summary("Migración finalizada", lines, accent=C.GRN)
 
     def bridge_mode(self, *, accept_all: bool = False, dest: str = "", protocol: str = "rsync", profile: str = ""):
         print_logo(compact=True)
@@ -1605,11 +1908,26 @@ class OmniCore:
         profile = self.normalize_profile(profile)
         action = "create"
         if not accept_all:
-            bullet("1. create  - create recovery bundles", C.PRIMARY)
-            bullet("2. send    - send latest bundles to remote destination", C.PRIMARY)
-            bullet("3. receive - restore latest bundles on this host", C.PRIMARY)
-            nl()
-            action = self.prompt_text("Choose bridge action", "create").strip().lower()
+            options = ["create", "send", "receive"]
+            descriptions = [
+                "Crear bundles de estado y secretos en este host.",
+                "Enviar los últimos bundles al host destino.",
+                "Restaurar en este host desde los bundles ya presentes.",
+            ]
+            icons = ["📦", "📡", "♻️"]
+            try:
+                selected = select_menu(
+                    options,
+                    title="Bridge mode",
+                    descriptions=descriptions,
+                    icons=icons,
+                    default=0,
+                    show_index=True,
+                    footer="↑/↓ elegir acción · Enter confirmar",
+                )
+            except KeyboardInterrupt:
+                raise
+            action = options[selected]
         if action in {"2", "send"}:
             destination = dest or self.prompt_text("Remote destination (example ubuntu@host:/home/ubuntu/omni-bundles)", "")
             if not destination:
@@ -1618,6 +1936,19 @@ class OmniCore:
             result = self.transfer.transfer_directory(str(self.bundle_dir), destination, {"protocol": protocol, "compress": True})
             if result.get("success"):
                 ok(f"Bridge send complete: {destination}")
+                if self.is_interactive():
+                    render_action_summary(
+                        "Bridge listo",
+                        [
+                            f"Destino: {destination}",
+                            f"Origen enviado: {self.bundle_dir}",
+                            "",
+                            "Siguiente paso recomendado en el host destino:",
+                            "$ omni restore --profile full-home",
+                            "$ omni migrate --profile full-home",
+                        ],
+                        accent=C.GRN,
+                    )
             else:
                 fail(result.get("error", "Bridge send failed"))
             return
@@ -2070,99 +2401,54 @@ def main():
 
     core = OmniCore()
 
-    if action in ["help", "?"] or args.help:
-        core.show_help()
-    elif action == "start":
-        core.start_guided(accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
-    elif action == "check":
-        core.run_health_check()
-    elif action == "fix":
-        core.run_full_fix()
-    elif action == "watch":
-        core.watch_mode(args.interval)
-    elif action == "status":
-        core.show_status()
-    elif action == "doctor":
-        core.show_doctor()
-    elif action == "logs":
-        core.show_logs(args.lines, args.follow)
-    elif action == "restart":
-        core.restart_services()
-    elif action == "backup":
-        core.run_backup()
-    elif action in ["transfer", "tr"]:
-        if len(remaining) >= 2:
-            core.run_transfer(remaining[0], remaining[1], {"protocol": args.protocol, "compress": args.compress})
-        else:
-            fail("Source and destination required")
-            hint("Usage: omni transfer <src> <dest>")
-    elif action == "config":
-        core.show_config()
-    elif action == "version":
-        core.show_version()
-    elif action == "monitor":
-        core.show_monitor(5)
-    elif action == "clean":
-        core.clean_temp()
-    elif action == "repos":
-        core.show_repos()
-    elif action == "processes":
-        core.show_processes()
-    elif action == "install":
-        core.show_install_guide()
-    elif action == "init":
-        core.init_workspace(profile=args.profile)
-    elif action == "sync":
-        core.sync_remote_servers()
-    elif action == "capture":
-        core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), profile=args.profile)
-    elif action == "restore":
-        core.restore_host_cmd(
-            manifest_path=args.manifest,
-            home_root=args.home_root,
-            bundle_path=args.bundle,
-            secrets_path=args.secrets,
-            target_root=args.target_root,
-            passphrase_env=args.passphrase_env,
-            accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
-            install_timer=args.yes or args.accept_all,
-            on_calendar=args.on_calendar,
-            profile=args.profile,
-        )
-    elif action == "migrate":
-        core.migrate_host_cmd(
-            manifest_path=args.manifest,
-            home_root=args.home_root,
-            bundle_path=args.bundle,
-            secrets_path=args.secrets,
-            target_root=args.target_root,
-            passphrase_env=args.passphrase_env,
-            accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
-            install_timer=args.yes or args.accept_all,
-            on_calendar=args.on_calendar,
-            apply_rewrite=args.apply or args.yes or args.accept_all,
-            profile=args.profile,
-        )
-    elif action == "detect-ip":
-        core.detect_ip_cmd()
-    elif action == "rewrite-ip":
-        root = remaining[0] if remaining else args.home_root
-        core.rewrite_ip_cmd(
-            root=root,
-            target_public_ip=args.target_public_ip,
-            target_private_ip=args.target_private_ip,
-            target_hostname=args.target_hostname,
-            apply_changes=args.apply,
-            accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
-            context_lines=args.context_lines,
-        )
-    elif action == "bridge":
-        bridge_action = remaining[0] if remaining else ""
-        if bridge_action in {"create", ""}:
+    try:
+        if action in ["help", "?"] or args.help:
+            core.show_help()
+        elif action == "start":
+            core.start_guided(accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
+        elif action == "check":
+            core.run_health_check()
+        elif action == "fix":
+            core.run_full_fix()
+        elif action == "watch":
+            core.watch_mode(args.interval)
+        elif action == "status":
+            core.show_status()
+        elif action == "doctor":
+            core.show_doctor()
+        elif action == "logs":
+            core.show_logs(args.lines, args.follow)
+        elif action == "restart":
+            core.restart_services()
+        elif action == "backup":
+            core.run_backup()
+        elif action in ["transfer", "tr"]:
+            if len(remaining) >= 2:
+                core.run_transfer(remaining[0], remaining[1], {"protocol": args.protocol, "compress": args.compress})
+            else:
+                fail("Source and destination required")
+                hint("Usage: omni transfer <src> <dest>")
+        elif action == "config":
+            core.show_config()
+        elif action == "version":
+            core.show_version()
+        elif action == "monitor":
+            core.show_monitor(5)
+        elif action == "clean":
+            core.clean_temp()
+        elif action == "repos":
+            core.show_repos()
+        elif action == "processes":
+            core.show_processes()
+        elif action == "install":
+            core.show_install_guide()
+        elif action == "init":
+            core.init_workspace(profile=args.profile)
+        elif action == "sync":
+            core.sync_remote_servers()
+        elif action == "capture":
             core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), profile=args.profile)
-        elif bridge_action == "send":
-            core.bridge_mode(accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), dest=args.dest or (remaining[1] if len(remaining) > 1 else ""), protocol=args.protocol)
-        elif bridge_action in {"receive", "restore"}:
+        elif action == "restore":
             core.restore_host_cmd(
                 manifest_path=args.manifest,
                 home_root=args.home_root,
@@ -2175,48 +2461,98 @@ def main():
                 on_calendar=args.on_calendar,
                 profile=args.profile,
             )
+        elif action == "migrate":
+            core.migrate_host_cmd(
+                manifest_path=args.manifest,
+                home_root=args.home_root,
+                bundle_path=args.bundle,
+                secrets_path=args.secrets,
+                target_root=args.target_root,
+                passphrase_env=args.passphrase_env,
+                accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
+                install_timer=args.yes or args.accept_all,
+                on_calendar=args.on_calendar,
+                apply_rewrite=args.apply or args.yes or args.accept_all,
+                profile=args.profile,
+            )
+        elif action == "detect-ip":
+            core.detect_ip_cmd()
+        elif action == "rewrite-ip":
+            root = remaining[0] if remaining else args.home_root
+            core.rewrite_ip_cmd(
+                root=root,
+                target_public_ip=args.target_public_ip,
+                target_private_ip=args.target_private_ip,
+                target_hostname=args.target_hostname,
+                apply_changes=args.apply,
+                accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
+                context_lines=args.context_lines,
+            )
+        elif action == "bridge":
+            bridge_action = remaining[0] if remaining else ""
+            if bridge_action in {"create", ""}:
+                core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), profile=args.profile)
+            elif bridge_action == "send":
+                core.bridge_mode(accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), dest=args.dest or (remaining[1] if len(remaining) > 1 else ""), protocol=args.protocol)
+            elif bridge_action in {"receive", "restore"}:
+                core.restore_host_cmd(
+                    manifest_path=args.manifest,
+                    home_root=args.home_root,
+                    bundle_path=args.bundle,
+                    secrets_path=args.secrets,
+                    target_root=args.target_root,
+                    passphrase_env=args.passphrase_env,
+                    accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
+                    install_timer=args.yes or args.accept_all,
+                    on_calendar=args.on_calendar,
+                    profile=args.profile,
+                )
+            else:
+                fail(f"Unknown bridge action: {bridge_action}")
+                hint("Use: omni bridge create|send|receive")
+        elif action == "inventory":
+            core.show_inventory(args.manifest, args.home_root, args.output, profile=args.profile)
+        elif action == "bundle-create":
+            core.create_state_bundle_cmd(args.manifest, args.home_root, args.output, profile=args.profile)
+        elif action == "bundle-restore":
+            bundle_path = args.bundle
+            if args.bundle_latest and not bundle_path:
+                bundle_path = ""
+            core.restore_state_bundle_cmd(bundle_path, args.target_root)
+        elif action == "secrets-export":
+            core.export_secrets_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, profile=args.profile)
+        elif action == "secrets-import":
+            secrets_path = args.secrets
+            if args.secrets_latest and not secrets_path:
+                secrets_path = ""
+            core.import_secrets_cmd(secrets_path, args.target_root, args.passphrase_env)
+        elif action == "reconcile":
+            resolved_bundle = ""
+            resolved_secrets = ""
+            if args.bundle or args.bundle_latest:
+                resolved_bundle = str(latest_or_explicit(core.bundle_dir, args.bundle, "state_bundle") or "")
+            if args.secrets or args.secrets_latest:
+                resolved_secrets = str(latest_or_explicit(core.bundle_dir, args.secrets, "secrets_bundle") or "")
+            core.reconcile_host_cmd(
+                args.manifest,
+                args.home_root,
+                resolved_bundle,
+                resolved_secrets,
+                args.target_root,
+                args.passphrase_env,
+                profile=args.profile,
+            )
+        elif action == "timer-install":
+            core.install_timer_cmd(args.service_name, args.on_calendar)
+        elif action == "purge":
+            core.purge_cmd(args.manifest, args.home_root, args.include_secrets, args.yes, profile=args.profile)
         else:
-            fail(f"Unknown bridge action: {bridge_action}")
-            hint("Use: omni bridge create|send|receive")
-    elif action == "inventory":
-        core.show_inventory(args.manifest, args.home_root, args.output, profile=args.profile)
-    elif action == "bundle-create":
-        core.create_state_bundle_cmd(args.manifest, args.home_root, args.output, profile=args.profile)
-    elif action == "bundle-restore":
-        bundle_path = args.bundle
-        if args.bundle_latest and not bundle_path:
-            bundle_path = ""
-        core.restore_state_bundle_cmd(bundle_path, args.target_root)
-    elif action == "secrets-export":
-        core.export_secrets_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, profile=args.profile)
-    elif action == "secrets-import":
-        secrets_path = args.secrets
-        if args.secrets_latest and not secrets_path:
-            secrets_path = ""
-        core.import_secrets_cmd(secrets_path, args.target_root, args.passphrase_env)
-    elif action == "reconcile":
-        resolved_bundle = ""
-        resolved_secrets = ""
-        if args.bundle or args.bundle_latest:
-            resolved_bundle = str(latest_or_explicit(core.bundle_dir, args.bundle, "state_bundle") or "")
-        if args.secrets or args.secrets_latest:
-            resolved_secrets = str(latest_or_explicit(core.bundle_dir, args.secrets, "secrets_bundle") or "")
-        core.reconcile_host_cmd(
-            args.manifest,
-            args.home_root,
-            resolved_bundle,
-            resolved_secrets,
-            args.target_root,
-            args.passphrase_env,
-            profile=args.profile,
-        )
-    elif action == "timer-install":
-        core.install_timer_cmd(args.service_name, args.on_calendar)
-    elif action == "purge":
-        core.purge_cmd(args.manifest, args.home_root, args.include_secrets, args.yes, profile=args.profile)
-    else:
-        print(f"Unknown action: {action}")
-        hint("Run 'omni help' for available commands")
+            print(f"Unknown action: {action}")
+            hint("Run 'omni help' for available commands")
+    except KeyboardInterrupt:
+        print()
+        warn("Operación cancelada por el usuario.")
+        sys.exit(130)
 
 if __name__ == "__main__":
     main()
