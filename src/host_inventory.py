@@ -5,9 +5,10 @@ import fnmatch
 import json
 import os
 import subprocess
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Set
 
 
 DEFAULT_EXCLUDE_PATTERNS = [
@@ -95,6 +96,9 @@ DEFAULT_NPM_GLOBAL_PACKAGES = [
     "pm2",
 ]
 
+DEFAULT_PROFILE = "production-clean"
+FULL_HOME_PROFILE = "full-home"
+
 CACHE_HINTS = {
     ".cache",
     ".npm",
@@ -120,6 +124,154 @@ PRODUCT_HINTS = {
     ".pm2",
 }
 
+COMMON_SECRET_DIRS = {
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".pki",
+}
+
+COMMON_SECRET_FILES = {
+    ".env",
+    ".git-credentials",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".appium.env",
+}
+
+COMMON_SECRET_GLOBS = [
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.crt",
+    "*.p12",
+    "*.pfx",
+    "*.ovpn",
+    "*.kubeconfig",
+]
+
+IGNORED_SECRET_FILE_GLOBS = [
+    ".env.example",
+    ".env.*.example",
+    "*.example",
+    "*.sample",
+    "*.template",
+    "*.dist",
+]
+
+WELL_KNOWN_SECRET_RELATIVE_PATHS = [
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".pki",
+    ".docker/config.json",
+    ".config/gh",
+    ".config/gcloud",
+    ".config/opencode",
+    ".n8n/config",
+    ".git-credentials",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+]
+
+
+def looks_like_secret_file(path: Path, rel_file: str = "") -> bool:
+    name = path.name
+    lower_name = name.lower()
+    rel_parts = [part for part in rel_file.replace("\\", "/").split("/") if part]
+    depth = len(rel_parts)
+
+    if any(fnmatch.fnmatch(lower_name, pattern) for pattern in IGNORED_SECRET_FILE_GLOBS):
+        return False
+    if name in COMMON_SECRET_FILES:
+        return depth <= 3
+    if name.startswith(".env"):
+        return True
+    if any(fnmatch.fnmatch(name, pattern) for pattern in COMMON_SECRET_GLOBS):
+        return depth <= 4
+    return False
+
+
+def discover_full_home_secret_paths(
+    home_root: str = "/home/ubuntu",
+    exclude_patterns: Iterable[str] | None = None,
+) -> List[str]:
+    home = Path(expand_path(home_root, home_root)).resolve()
+    patterns = list(exclude_patterns or DEFAULT_EXCLUDE_PATTERNS)
+    found: Set[str] = set()
+
+    for relative in WELL_KNOWN_SECRET_RELATIVE_PATHS:
+        candidate = home / relative
+        if candidate.exists():
+            found.add(str(candidate))
+
+    if not home.exists():
+        return sorted(found)
+
+    for root, dirs, files in os.walk(home):
+        root_path = Path(root)
+        rel_root = str(root_path.relative_to(home)) if root_path != home else ""
+
+        filtered_dirs = []
+        for name in dirs:
+            rel_dir = "/".join(part for part in (rel_root, name) if part).strip("/")
+            if is_excluded(rel_dir, patterns):
+                continue
+            candidate = root_path / name
+            if name in COMMON_SECRET_DIRS and root_path == home:
+                found.add(str(candidate))
+                continue
+            filtered_dirs.append(name)
+        dirs[:] = filtered_dirs
+
+        for name in files:
+            rel_file = "/".join(part for part in (rel_root, name) if part).strip("/")
+            if is_excluded(rel_file, patterns):
+                continue
+            candidate = root_path / name
+            if looks_like_secret_file(candidate, rel_file):
+                found.add(str(candidate))
+
+    return sorted(found)
+
+
+def profile_presets(home_root: str = "/home/ubuntu") -> Dict[str, Dict[str, Any]]:
+    home = expand_path(home_root, home_root)
+    production_clean = build_default_manifest(home_root, profile=DEFAULT_PROFILE, include_profile_defaults=False)
+    full_home_secret_paths = discover_full_home_secret_paths(home_root, DEFAULT_EXCLUDE_PATTERNS)
+    full_home = {
+        "version": 1,
+        "profile": FULL_HOME_PROFILE,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "host_root": home,
+        "state_paths": [home],
+        "secret_paths": full_home_secret_paths,
+        "state_exclude_paths": [
+            expand_path("~/omni-core/backups/host-bundles", home_root),
+        ],
+        "install_targets": list(DEFAULT_INSTALL_TARGETS),
+        "pm2_ecosystems": list(DEFAULT_PM2_ECOSYSTEMS),
+        "compose_projects": list(DEFAULT_COMPOSE_PROJECTS),
+        "exclude_patterns": list(DEFAULT_EXCLUDE_PATTERNS),
+        "apt_packages": list(DEFAULT_APT_PACKAGES),
+        "npm_global_packages": list(DEFAULT_NPM_GLOBAL_PACKAGES),
+    }
+    return {
+        DEFAULT_PROFILE: production_clean,
+        FULL_HOME_PROFILE: full_home,
+    }
+
+
+def build_profile_manifest(profile: str = DEFAULT_PROFILE, home_root: str = "/home/ubuntu") -> Dict[str, Any]:
+    presets = profile_presets(home_root)
+    normalized_profile = str(profile or DEFAULT_PROFILE).strip().lower().replace("_", "-")
+    selected = presets.get(normalized_profile, presets[DEFAULT_PROFILE])
+    return deepcopy(selected)
+
 
 def expand_path(raw_path: str, home_root: str = "/home/ubuntu") -> str:
     if not raw_path:
@@ -133,29 +285,45 @@ def expand_path(raw_path: str, home_root: str = "/home/ubuntu") -> str:
 
 def normalize_manifest(manifest: Dict[str, Any], home_root: str) -> Dict[str, Any]:
     normalized = dict(manifest or {})
-    normalized["host_root"] = expand_path(normalized.get("host_root", home_root), home_root)
+    profile = str(normalized.get("profile") or DEFAULT_PROFILE).strip() or DEFAULT_PROFILE
+    defaults = build_profile_manifest(profile, home_root)
+    normalized["profile"] = defaults.get("profile", profile)
+    normalized["host_root"] = expand_path(normalized.get("host_root", defaults.get("host_root", home_root)), home_root)
     for key in (
         "state_paths",
         "secret_paths",
+        "state_exclude_paths",
         "install_targets",
         "pm2_ecosystems",
         "compose_projects",
     ):
-        normalized[key] = [expand_path(item, home_root) for item in normalized.get(key, [])]
+        if key in normalized:
+            values = normalized.get(key) or []
+        else:
+            values = defaults.get(key, [])
+        normalized[key] = [expand_path(item, home_root) for item in values]
     normalized["exclude_patterns"] = list(normalized.get("exclude_patterns", []))
     normalized["apt_packages"] = list(normalized.get("apt_packages", []))
     normalized["npm_global_packages"] = list(normalized.get("npm_global_packages", []))
     return normalized
 
 
-def build_default_manifest(home_root: str = "/home/ubuntu") -> Dict[str, Any]:
+def build_default_manifest(
+    home_root: str = "/home/ubuntu",
+    profile: str = DEFAULT_PROFILE,
+    *,
+    include_profile_defaults: bool = True,
+) -> Dict[str, Any]:
+    if include_profile_defaults:
+        return build_profile_manifest(profile, home_root)
     manifest = {
         "version": 1,
-        "profile": "production-clean",
+        "profile": profile,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "host_root": expand_path(home_root, home_root),
         "state_paths": [expand_path(path, home_root) for path in DEFAULT_STATE_PATHS],
         "secret_paths": [expand_path(path, home_root) for path in DEFAULT_SECRET_PATHS],
+        "state_exclude_paths": [],
         "install_targets": [expand_path(path, home_root) for path in DEFAULT_INSTALL_TARGETS],
         "pm2_ecosystems": [expand_path(path, home_root) for path in DEFAULT_PM2_ECOSYSTEMS],
         "compose_projects": [expand_path(path, home_root) for path in DEFAULT_COMPOSE_PROJECTS],
@@ -178,12 +346,51 @@ def save_manifest(manifest_path: Path, manifest: Dict[str, Any]) -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def ensure_manifest(manifest_path: Path, home_root: str = "/home/ubuntu") -> Dict[str, Any]:
-    if manifest_path.exists():
-        return load_manifest(manifest_path, home_root)
-    manifest = build_default_manifest(home_root)
+def ensure_manifest(
+    manifest_path: Path,
+    home_root: str = "/home/ubuntu",
+    profile: str = DEFAULT_PROFILE,
+    force_profile: bool = False,
+) -> Dict[str, Any]:
+    if manifest_path.exists() and not force_profile:
+        loaded = load_manifest(manifest_path, home_root)
+        if profile and loaded.get("profile") != profile:
+            manifest = build_default_manifest(home_root, profile=profile)
+            save_manifest(manifest_path, manifest)
+            return manifest
+        return loaded
+    manifest = build_default_manifest(home_root, profile=profile)
     save_manifest(manifest_path, manifest)
     return manifest
+
+
+def build_state_exclude_patterns(manifest: Dict[str, Any], home_root: str = "/home/ubuntu") -> List[str]:
+    patterns: List[str] = []
+    seen: set[str] = set()
+    resolved_home = expand_path(str(manifest.get("host_root") or home_root), home_root)
+
+    def add(pattern: str) -> None:
+        normalized = str(pattern).strip().replace("\\", "/")
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        patterns.append(normalized)
+
+    for pattern in manifest.get("exclude_patterns", []):
+        add(pattern)
+
+    for pattern in manifest.get("state_exclude_paths", []):
+        add(Path(expand_path(str(pattern), resolved_home)).name)
+        add(str(pattern))
+
+    for raw_secret in manifest.get("secret_paths", []):
+        secret_path = Path(expand_path(str(raw_secret), resolved_home))
+        add(secret_path.name)
+        if secret_path.name.startswith(".env"):
+            add(".env")
+            add(".env*")
+
+    return patterns
 
 
 def path_size_bytes(path: str) -> int:
@@ -240,10 +447,11 @@ def is_excluded(rel_path: str, patterns: Iterable[str]) -> bool:
 
 
 def classify_path(path: Path, manifest: Dict[str, Any]) -> str:
-    path_str = str(path)
-    if path_str in set(manifest.get("state_paths", [])):
+    state_paths = [Path(item) for item in manifest.get("state_paths", [])]
+    secret_paths = [Path(item) for item in manifest.get("secret_paths", [])]
+    if any(path == candidate or path.is_relative_to(candidate) for candidate in state_paths):
         return "state"
-    if path_str in set(manifest.get("secret_paths", [])):
+    if any(path == candidate or path.is_relative_to(candidate) for candidate in secret_paths):
         return "secret"
     if path.name in CACHE_HINTS:
         return "noise"

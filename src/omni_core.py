@@ -30,6 +30,9 @@ from bundle_ops import (
 from bridge_ops import load_capture_summary, summarize_bundle_pair, write_capture_summary
 from cleanup_ops import build_purge_plan, execute_purge
 from host_inventory import (
+    DEFAULT_PROFILE,
+    FULL_HOME_PROFILE,
+    build_default_manifest,
     ensure_manifest,
     expand_path,
     human_size,
@@ -747,10 +750,49 @@ class OmniCore:
             except Exception as e:
                 debug(f"Failed to load tasks.json: {e}")
 
-    def resolve_manifest(self, manifest_path: str = "", home_root: str = "", create: bool = True) -> tuple[Path, Dict[str, Any]]:
+    def normalize_profile(self, profile: str = "") -> str:
+        raw = (profile or os.environ.get("OMNI_PROFILE", "") or "").strip().lower().replace("_", "-")
+        if raw in {"full-home", "full", "home", "todo", "all-home", "all"}:
+            return FULL_HOME_PROFILE
+        return DEFAULT_PROFILE
+
+    def choose_profile(self, requested: str = "", *, accept_all: bool = False) -> str:
+        resolved = self.normalize_profile(requested)
+        if requested or accept_all or not self.is_interactive():
+            return resolved
+
+        current_profile = DEFAULT_PROFILE
+        if self.manifest_path.exists():
+            try:
+                current_profile = load_manifest(self.manifest_path, str(Path.home())).get("profile", DEFAULT_PROFILE)
+            except Exception:
+                current_profile = DEFAULT_PROFILE
+        default_profile = self.normalize_profile(current_profile)
+
+        bullet("Scope", C.PRIMARY, bold=True)
+        dim("1. production-clean  -> restaura arquitectura curada, más liviana")
+        dim("2. full-home         -> captura/restaura TODO /home/ubuntu")
+        nl()
+
+        choice = self.prompt_text("Choose scope", default_profile)
+        return self.normalize_profile(choice)
+
+    def resolve_manifest(
+        self,
+        manifest_path: str = "",
+        home_root: str = "",
+        create: bool = True,
+        profile: str = "",
+        force_profile: bool = False,
+    ) -> tuple[Path, Dict[str, Any]]:
         selected = Path(manifest_path).expanduser() if manifest_path else self.manifest_path
         resolved_home = expand_path(home_root or str(Path.home()))
-        manifest = ensure_manifest(selected, resolved_home) if create else load_manifest(selected, resolved_home)
+        selected_profile = self.normalize_profile(profile)
+        manifest = (
+            ensure_manifest(selected, resolved_home, profile=selected_profile, force_profile=force_profile)
+            if create
+            else load_manifest(selected, resolved_home)
+        )
         return selected, manifest
 
     def resolve_output_path(self, output: str, prefix: str, encrypted: bool = False) -> Path:
@@ -1088,7 +1130,7 @@ class OmniCore:
         bullet("omni status    - Show system status", C.GRN)
         bullet("omni logs      - View Omni logs", C.GRN)
         bullet("omni doctor    - Run the guided health and recovery audit", C.GRN)
-        bullet("omni capture   - Build a full recovery pack", C.GRN)
+        bullet("omni capture   - Build a full recovery pack from the active profile", C.GRN)
         bullet("omni restore   - Restore from latest bundle + secrets", C.GRN)
         bullet("omni migrate   - Rebuild this host end to end", C.GRN)
         nl()
@@ -1106,9 +1148,10 @@ class OmniCore:
         bullet("omni processes - Show PM2 processes", C.PRIMARY)
         bullet("omni install   - Show portable install guide", C.PRIMARY)
         bullet("omni init      - Create missing local config/runtime files", C.PRIMARY)
+        dim("    Use `omni init --profile full-home` for a full /home/ubuntu capture")
         bullet("omni sync      - Pull snapshots from configured servers", C.PRIMARY)
         bullet("omni inventory - Classify host state vs. secrets vs. noise", C.PRIMARY)
-        bullet("omni bundle-create - Export production-clean state bundle", C.PRIMARY)
+        bullet("omni bundle-create - Export state bundle from the active profile", C.PRIMARY)
         bullet("omni bundle-restore - Restore latest or explicit state bundle", C.PRIMARY)
         bullet("omni secrets-export - Export encrypted secrets pack", C.PRIMARY)
         bullet("omni secrets-import - Import encrypted secrets pack", C.PRIMARY)
@@ -1136,6 +1179,7 @@ class OmniCore:
         bullet("--protocol      Transfer protocol (scp|rsync)", C.G3)
         bullet("--compress      Enable compression for transfer", C.G3)
         bullet("--manifest      System manifest path", C.G3)
+        bullet("--profile       Manifest profile (production-clean|full-home)", C.G3)
         bullet("--output        Output file or directory", C.G3)
         bullet("--bundle        Explicit state bundle path", C.G3)
         bullet("--secrets       Explicit secrets bundle path", C.G3)
@@ -1153,10 +1197,14 @@ class OmniCore:
         print("  " + q(C.G3, "Run 'omni <command>' to execute"))
         print()
 
-    def init_workspace(self):
+    def init_workspace(self, profile: str = ""):
         print_logo(compact=True)
         render_help_overview()
         section("Workspace Init")
+
+        requested_profile = str(profile or "").strip().lower().replace("_", "-")
+        manifest_path = CONFIG_DIR / "system_manifest.json"
+        manifest_was_present = manifest_path.exists()
 
         for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, LOG_DIR):
             path.mkdir(parents=True, exist_ok=True)
@@ -1182,11 +1230,28 @@ class OmniCore:
             else:
                 missing_templates.append(template)
 
+        manifest_path = CONFIG_DIR / "system_manifest.json"
+        if profile and manifest_path in created:
+            save_manifest(manifest_path, build_default_manifest(str(Path.home()), profile=profile))
+
         if not TASKS_FILE.exists():
             TASKS_FILE.write_text("[]\n", encoding="utf-8")
             created.append(TASKS_FILE)
         else:
             existing.append(TASKS_FILE)
+
+        if requested_profile:
+            manifest = build_default_manifest(str(Path.home()), profile=requested_profile)
+            save_manifest(manifest_path, manifest)
+            if manifest_path in created:
+                created.remove(manifest_path)
+            if manifest_path in existing:
+                existing.remove(manifest_path)
+            if manifest_was_present:
+                existing.append(manifest_path)
+            else:
+                created.append(manifest_path)
+            ok(f"Activated profile {manifest['profile']} in {manifest_path}")
 
         servers_path = CONFIG_DIR / "servers.json"
         if servers_path.exists():
@@ -1218,8 +1283,13 @@ class OmniCore:
         nl()
         bullet("Next steps", C.PRIMARY, bold=True)
         dim("1. Edit .env and config/*.json if needed")
-        dim("2. Run ./install.sh --compose --sync --timer")
-        dim("3. Validate with omni status and omni inventory")
+        if requested_profile:
+            dim(f"2. Manifest profile active: {requested_profile}")
+            dim("3. Run ./install.sh --compose --sync --timer")
+            dim("4. Validate with omni status and omni inventory")
+        else:
+            dim("2. Run ./install.sh --compose --sync --timer")
+            dim("3. Validate with omni status and omni inventory")
         nl()
 
     def start_guided(self, *, accept_all: bool = False) -> None:
@@ -1228,12 +1298,19 @@ class OmniCore:
         chosen_flow = ""
         requested_flow_raw = os.environ.get("OMNI_START_FLOW", "").strip()
         requested_flow = normalize_flow_choice(requested_flow_raw) if requested_flow_raw else ""
+        profile = self.normalize_profile("")
+        if self.manifest_path.exists():
+            try:
+                profile = self.normalize_profile(load_manifest(self.manifest_path, str(Path.home())).get("profile", DEFAULT_PROFILE))
+            except Exception:
+                profile = self.normalize_profile("")
 
         print_logo(tagline=False)
         render_help_overview()
         section("Guided Start")
         kv("Detected Platform", f"{info_obj.system} / {info_obj.shell} / {info_obj.package_manager}", color=C.GRN)
         kv("Mode", "accept-all" if effective_accept_all else "guided", color=C.YLW if effective_accept_all else C.GRN)
+        kv("Default Scope", profile, color=C.GRN)
         nl()
 
         for option in build_flow_options(info_obj):
@@ -1254,20 +1331,23 @@ class OmniCore:
             nl()
             chosen_flow = normalize_flow_choice(self.prompt_text("Choose flow", "bridge"))
 
+        if chosen_flow in {"bridge", "capture", "restore", "migrate"}:
+            profile = self.choose_profile(profile, accept_all=effective_accept_all)
+
         if chosen_flow == "advanced":
             self.show_help()
             return
         if chosen_flow == "bridge":
-            self.bridge_mode(accept_all=effective_accept_all)
+            self.bridge_mode(accept_all=effective_accept_all, profile=profile)
             return
         if chosen_flow == "capture":
-            self.capture_host_cmd(accept_all=effective_accept_all)
+            self.capture_host_cmd(accept_all=effective_accept_all, profile=profile)
             return
         if chosen_flow == "restore":
-            self.restore_host_cmd(accept_all=effective_accept_all, install_timer=effective_accept_all)
+            self.restore_host_cmd(accept_all=effective_accept_all, install_timer=effective_accept_all, profile=profile)
             return
         if chosen_flow == "migrate":
-            self.migrate_host_cmd(accept_all=effective_accept_all, install_timer=effective_accept_all)
+            self.migrate_host_cmd(accept_all=effective_accept_all, install_timer=effective_accept_all, profile=profile)
             return
         if chosen_flow == "doctor":
             self.show_doctor()
@@ -1286,6 +1366,12 @@ class OmniCore:
         kv("Memory", mem.get("message", "Unknown"), color=C.GRN if mem.get("status") == "ok" else C.YLW)
         kv("PM2", pm2.get("message", "Unknown"), color=C.GRN if not pm2.get("restarted") else C.YLW)
         kv("Manifest", str(self.manifest_path), color=C.GRN)
+        try:
+            manifest = load_manifest(self.manifest_path, str(Path.home()))
+            kv("Profile", str(manifest.get("profile", "unknown")), color=C.GRN)
+            kv("Host Root", str(manifest.get("host_root", "unknown")), color=C.GRN)
+        except Exception:
+            pass
         kv("Bundle Dir", str(self.bundle_dir), color=C.GRN)
         nl()
 
@@ -1318,10 +1404,11 @@ class OmniCore:
         passphrase_env: str = "OMNI_SECRET_PASSPHRASE",
         *,
         accept_all: bool = False,
+        profile: str = "",
     ):
         print_logo(compact=True)
         section("Capture Recovery Pack")
-        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         bundle_dir = self.capture_output_dir(output)
         passphrase = self.read_passphrase(passphrase_env)
 
@@ -1362,11 +1449,12 @@ class OmniCore:
         accept_all: bool = False,
         install_timer: bool = False,
         on_calendar: str = "daily",
+        profile: str = "",
     ):
         print_logo(compact=True)
         section("Restore Host")
-        self.init_workspace()
-        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        self.init_workspace(profile=profile)
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         passphrase = self.read_passphrase(passphrase_env)
         resolved_bundle = str(latest_or_explicit(self.bundle_dir, bundle_path, "state_bundle") or "")
         resolved_secrets = str(latest_or_explicit(self.bundle_dir, secrets_path, "secrets_bundle") or "")
@@ -1487,6 +1575,7 @@ class OmniCore:
         install_timer: bool = False,
         on_calendar: str = "daily",
         apply_rewrite: bool = True,
+        profile: str = "",
     ):
         print_logo(compact=True)
         section("Migrate Host")
@@ -1504,14 +1593,16 @@ class OmniCore:
             accept_all=accept_all,
             install_timer=install_timer,
             on_calendar=on_calendar,
+            profile=profile,
         )
 
         if apply_rewrite and self.confirm_step("Detect and rewrite old host references to this host?", accept_all=accept_all):
             self.rewrite_ip_cmd(root=home_root or str(Path.home()), apply_changes=True, accept_all=True)
 
-    def bridge_mode(self, *, accept_all: bool = False, dest: str = "", protocol: str = "rsync"):
+    def bridge_mode(self, *, accept_all: bool = False, dest: str = "", protocol: str = "rsync", profile: str = ""):
         print_logo(compact=True)
         section("Bridge Mode")
+        profile = self.normalize_profile(profile)
         action = "create"
         if not accept_all:
             bullet("1. create  - create recovery bundles", C.PRIMARY)
@@ -1530,17 +1621,18 @@ class OmniCore:
             else:
                 fail(result.get("error", "Bridge send failed"))
             return
+        profile = self.choose_profile(profile, accept_all=accept_all)
         if action in {"3", "receive", "restore"}:
-            self.restore_host_cmd(accept_all=accept_all, install_timer=accept_all)
+            self.restore_host_cmd(accept_all=accept_all, install_timer=accept_all, profile=profile)
             return
-        self.capture_host_cmd(accept_all=accept_all)
+        self.capture_host_cmd(accept_all=accept_all, profile=profile)
 
     def show_install_guide(self):
         print_logo(tagline=False)
         render_help_overview()
         section("Portable Install")
         bullet("1. Copy or clone this folder to the target server", C.GRN)
-        bullet("2. Run: omni init", C.GRN)
+        bullet("2. Run: omni init --profile full-home", C.GRN)
         bullet("3. Edit .env, config/repos.json, config/servers.json and system_manifest.json", C.GRN)
         bullet("4. Run: ./install.sh --compose --sync --timer", C.GRN)
         bullet("5. Run `omni` to enter the guided start flow", C.GRN)
@@ -1548,10 +1640,10 @@ class OmniCore:
         bullet("7. Rebuild host: omni migrate or omni restore", C.GRN)
         nl()
 
-    def show_inventory(self, manifest_path: str = "", home_root: str = "", output: str = ""):
+    def show_inventory(self, manifest_path: str = "", home_root: str = "", output: str = "", profile: str = ""):
         print_logo(compact=True)
         section("Host Inventory")
-        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         report = scan_home(home_root or manifest.get("host_root") or str(Path.home()), manifest)
 
         state_count = len([item for item in report["included"] if item["kind"] == "state"])
@@ -1583,19 +1675,19 @@ class OmniCore:
             }
             self.write_json_output(payload, output)
 
-    def create_state_bundle_cmd(self, manifest_path: str = "", home_root: str = "", output: str = ""):
+    def create_state_bundle_cmd(self, manifest_path: str = "", home_root: str = "", output: str = "", profile: str = ""):
         print_logo(compact=True)
         section("State Bundle")
-        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         bundle_path = self.resolve_output_path(output, "state_bundle", encrypted=False)
         created = create_state_bundle(self.bundle_dir, manifest, bundle_path=bundle_path)
         ok(f"State bundle created: {created}")
         dim(f"Manifest: {selected_path}")
 
-    def export_secrets_cmd(self, manifest_path: str = "", home_root: str = "", output: str = "", passphrase_env: str = "OMNI_SECRET_PASSPHRASE"):
+    def export_secrets_cmd(self, manifest_path: str = "", home_root: str = "", output: str = "", passphrase_env: str = "OMNI_SECRET_PASSPHRASE", profile: str = ""):
         print_logo(compact=True)
         section("Secrets Pack")
-        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         passphrase = self.read_passphrase(passphrase_env)
         bundle_path = self.resolve_output_path(output, "secrets_bundle", encrypted=bool(passphrase))
         created = create_secrets_bundle(self.bundle_dir, manifest, bundle_path=bundle_path, passphrase=passphrase)
@@ -1640,10 +1732,11 @@ class OmniCore:
         secrets_path: str = "",
         target_root: str = "/",
         passphrase_env: str = "OMNI_SECRET_PASSPHRASE",
+        profile: str = "",
     ):
         print_logo(compact=True)
         section("Host Reconcile")
-        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         passphrase = self.read_passphrase(passphrase_env)
         report = reconcile_host(
             manifest,
@@ -1686,10 +1779,11 @@ class OmniCore:
         home_root: str = "",
         include_secrets: bool = False,
         confirm: bool = False,
+        profile: str = "",
     ):
         print_logo(compact=True)
         section("Purge Installed State")
-        _, manifest = self.resolve_manifest(manifest_path, home_root, create=True)
+        _, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         plan = build_purge_plan(
             manifest,
             omni_home=OMNI_HOME,
@@ -1947,6 +2041,7 @@ def main():
     parser.add_argument("--secrets-latest", action="store_true", help="Use latest secrets bundle from bundle dir")
     parser.add_argument("--target-root", type=str, default="/", help="Restore target root")
     parser.add_argument("--home-root", type=str, default=str(Path.home()), help="Home root to inventory")
+    parser.add_argument("--profile", type=str, default=os.environ.get("OMNI_PROFILE", "").strip(), help="Manifest profile (production-clean|full-home)")
     parser.add_argument("--passphrase-env", type=str, default="OMNI_SECRET_PASSPHRASE", help="Environment variable containing secrets passphrase")
     parser.add_argument("--service-name", type=str, default="omni-update", help="Systemd service/timer name")
     parser.add_argument("--on-calendar", type=str, default="daily", help="systemd OnCalendar value")
@@ -1961,6 +2056,7 @@ def main():
     parser.add_argument("--dest", type=str, default="", help="Remote destination for bridge send")
 
     args, remaining = parser.parse_known_args()
+    args.profile = str(args.profile or "").strip().lower().replace("_", "-")
 
     if args.debug:
         global OMNI_DEBUG
@@ -2015,11 +2111,11 @@ def main():
     elif action == "install":
         core.show_install_guide()
     elif action == "init":
-        core.init_workspace()
+        core.init_workspace(profile=args.profile)
     elif action == "sync":
         core.sync_remote_servers()
     elif action == "capture":
-        core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
+        core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), profile=args.profile)
     elif action == "restore":
         core.restore_host_cmd(
             manifest_path=args.manifest,
@@ -2031,6 +2127,7 @@ def main():
             accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
             install_timer=args.yes or args.accept_all,
             on_calendar=args.on_calendar,
+            profile=args.profile,
         )
     elif action == "migrate":
         core.migrate_host_cmd(
@@ -2044,6 +2141,7 @@ def main():
             install_timer=args.yes or args.accept_all,
             on_calendar=args.on_calendar,
             apply_rewrite=args.apply or args.yes or args.accept_all,
+            profile=args.profile,
         )
     elif action == "detect-ip":
         core.detect_ip_cmd()
@@ -2061,7 +2159,7 @@ def main():
     elif action == "bridge":
         bridge_action = remaining[0] if remaining else ""
         if bridge_action in {"create", ""}:
-            core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
+            core.capture_host_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), profile=args.profile)
         elif bridge_action == "send":
             core.bridge_mode(accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ), dest=args.dest or (remaining[1] if len(remaining) > 1 else ""), protocol=args.protocol)
         elif bridge_action in {"receive", "restore"}:
@@ -2075,21 +2173,22 @@ def main():
                 accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
                 install_timer=args.yes or args.accept_all,
                 on_calendar=args.on_calendar,
+                profile=args.profile,
             )
         else:
             fail(f"Unknown bridge action: {bridge_action}")
             hint("Use: omni bridge create|send|receive")
     elif action == "inventory":
-        core.show_inventory(args.manifest, args.home_root, args.output)
+        core.show_inventory(args.manifest, args.home_root, args.output, profile=args.profile)
     elif action == "bundle-create":
-        core.create_state_bundle_cmd(args.manifest, args.home_root, args.output)
+        core.create_state_bundle_cmd(args.manifest, args.home_root, args.output, profile=args.profile)
     elif action == "bundle-restore":
         bundle_path = args.bundle
         if args.bundle_latest and not bundle_path:
             bundle_path = ""
         core.restore_state_bundle_cmd(bundle_path, args.target_root)
     elif action == "secrets-export":
-        core.export_secrets_cmd(args.manifest, args.home_root, args.output, args.passphrase_env)
+        core.export_secrets_cmd(args.manifest, args.home_root, args.output, args.passphrase_env, profile=args.profile)
     elif action == "secrets-import":
         secrets_path = args.secrets
         if args.secrets_latest and not secrets_path:
@@ -2109,11 +2208,12 @@ def main():
             resolved_secrets,
             args.target_root,
             args.passphrase_env,
+            profile=args.profile,
         )
     elif action == "timer-install":
         core.install_timer_cmd(args.service_name, args.on_calendar)
     elif action == "purge":
-        core.purge_cmd(args.manifest, args.home_root, args.include_secrets, args.yes)
+        core.purge_cmd(args.manifest, args.home_root, args.include_secrets, args.yes, profile=args.profile)
     else:
         print(f"Unknown action: {action}")
         hint("Run 'omni help' for available commands")

@@ -8,6 +8,7 @@ La experiencia nueva recomendada es:
 2. Linux instala `omni-core`
 3. tú usas `omni` o `omni start`
 4. eliges `bridge`, `capture`, `restore`, `migrate` o `doctor`
+5. si quieres llevarte todo `/home/ubuntu`, activas `omni init --profile full-home`
 
 Si no quieres entrar en claves, `pem` o SSH remoto desde PowerShell, usa mejor esta guía:
 
@@ -103,6 +104,7 @@ Qué hace ese comando:
 - entra por SSH al servidor Linux
 - instala paquetes base si faltan
 - clona o actualiza `omni-core`
+- puedes activar `omni init --profile full-home` antes de capturar si quieres migrar todo `/home/ubuntu`
 - ejecuta `install.sh --compose --sync`
 - opcionalmente instala el timer diario
 

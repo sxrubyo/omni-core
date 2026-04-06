@@ -1,6 +1,6 @@
 # Omni Core v2.1 - The Supreme Coordinator
 
-Omni Core está orientado a restaurar un entorno productivo limpio en Linux, sincronizar estado real desde otros hosts y dejar mantenimiento automático sin arrastrar ruido innecesario.
+Omni Core está orientado a restaurar un entorno productivo limpio en Linux o un `full-home` completo de `/home/ubuntu`, sincronizar estado real desde otros hosts y dejar mantenimiento automático sin arrastrar ruido innecesario.
 
 Ahora el punto de entrada recomendado ya no es memorizar comandos bajos: es ejecutar `omni` o `omni start` y dejar que la CLI te guíe hacia `bridge`, `capture`, `restore`, `migrate` o `doctor`.
 
@@ -66,6 +66,16 @@ Omni Core trabaja bien cuando se conservan estas piezas:
 - temporales de build
 - artefactos derivados que se pueden regenerar
 - `.git` en bundles de estado
+
+## Perfiles
+
+Omni usa perfiles de manifest para decidir qué captura y cómo activa la migración.
+
+- `production-clean`: conserva la huella productiva principal, con estado y secretos separados
+- `full-home`: captura todo `/home/ubuntu` como raíz de estado y mantiene secretos aparte
+- el `system_manifest.example.json` del repositorio ya viene preparado para `full-home`
+- `omni init --profile full-home`: activa el perfil completo antes de capturar o migrar
+- `omni init --profile production-clean`: vuelve al perfil productivo limpio
 
 ## Modos de instalación
 
@@ -239,7 +249,7 @@ data/servers/<server>/<ruta-remota-normalizada>/
 
 ```bash
 cd /opt/omni-core
-omni init
+omni init --profile full-home
 nano .env
 nano config/repos.json
 nano config/servers.json
@@ -250,7 +260,7 @@ omni
 ## Flujo recomendado de restauración
 
 1. clonar o copiar `omni-core`
-2. correr `omni init`
+2. correr `omni init --profile full-home` si quieres llevar todo `/home/ubuntu`
 3. mover `bundle + secrets` al host nuevo
 4. ejecutar `omni restore` o `omni migrate`
 5. validar `omni doctor`

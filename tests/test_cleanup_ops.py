@@ -16,6 +16,8 @@ class CleanupOpsTests(unittest.TestCase):
     def test_purge_plan_preserves_git_repo_root_but_collects_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            home_root = root / "home" / "ubuntu"
+            home_root.mkdir(parents=True)
             repo = root / "melissa"
             (repo / ".git").mkdir(parents=True)
             (repo / "node_modules").mkdir()
@@ -28,10 +30,11 @@ class CleanupOpsTests(unittest.TestCase):
 
             plan = build_purge_plan(
                 {
-                    "state_paths": [str(repo), str(state_dir)],
+                    "host_root": str(home_root),
+                    "state_paths": [str(repo), str(home_root), str(state_dir)],
                     "secret_paths": [],
                 },
-                omni_home=root / "omni-core",
+                omni_home=home_root,
                 bundle_dir=root / "bundles",
                 backup_dir=root / "backups",
                 state_dir=root / "state",
@@ -43,6 +46,7 @@ class CleanupOpsTests(unittest.TestCase):
             self.assertEqual(planned_paths[str(repo / "node_modules")], "repo_artifact")
             self.assertIn(str(state_dir), planned_paths)
             self.assertEqual(planned_paths[str(state_dir)], "managed_state")
+            self.assertNotIn(str(home_root), planned_paths)
             self.assertNotIn(str(repo), planned_paths)
 
     def test_execute_purge_removes_targets(self):

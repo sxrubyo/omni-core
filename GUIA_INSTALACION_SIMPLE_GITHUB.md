@@ -7,6 +7,7 @@ La regla nueva es simple:
 - instala `omni-core`
 - ejecuta `omni`
 - deja que el CLI te pregunte si quieres `bridge`, `capture`, `restore`, `migrate` o `doctor`
+- si quieres llevarte todo `/home/ubuntu`, primero corre `omni init --profile full-home`
 
 Tu caso correcto es este:
 
@@ -118,6 +119,7 @@ Eso hace esto:
 - levanta Docker Compose
 - ejecuta `sync`
 - instala el timer diario
+- si antes corriste `omni init --profile full-home`, el manifest ya quedará listo para capturar el home completo manteniendo secretos aparte
 
 ## Paso 6. Verifica que quedó bien
 

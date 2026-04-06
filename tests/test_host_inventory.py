@@ -12,9 +12,13 @@ if str(SRC) not in sys.path:
 
 from host_inventory import (  # noqa: E402
     build_default_manifest,
+    build_profile_manifest,
+    build_state_exclude_patterns,
+    discover_full_home_secret_paths,
     ensure_manifest,
     expand_path,
     is_excluded,
+    normalize_manifest,
     scan_home,
 )
 
@@ -26,6 +30,22 @@ class HostInventoryTests(unittest.TestCase):
             self.assertEqual(manifest["profile"], "production-clean")
             self.assertTrue(any(path.endswith("melissa") for path in manifest["state_paths"]))
             self.assertTrue(any(path.endswith(".ssh") for path in manifest["secret_paths"]))
+
+    def test_build_full_home_profile_uses_home_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".ssh").mkdir()
+            (home / ".ssh" / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+            (home / ".env").write_text("TOKEN=abc123\n", encoding="utf-8")
+            manifest = build_profile_manifest("full-home", tmp)
+            self.assertEqual(manifest["profile"], "full-home")
+            self.assertEqual(manifest["state_paths"], [expand_path(home.as_posix(), tmp)])
+            self.assertTrue(any(path.endswith(".ssh") for path in manifest["secret_paths"]))
+            self.assertTrue(any(path.endswith(".env") for path in manifest["secret_paths"]))
+            self.assertFalse(any(path.endswith("dump.pm2") for path in manifest["secret_paths"]))
+            patterns = build_state_exclude_patterns(manifest, tmp)
+            self.assertIn(".ssh", patterns)
+            self.assertIn(".env", patterns)
 
     def test_ensure_manifest_creates_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -55,6 +75,38 @@ class HostInventoryTests(unittest.TestCase):
             discovered = {item["name"]: item["classification"] for item in report["discovered"]}
             self.assertEqual(discovered["melissa"], "state")
             self.assertEqual(discovered[".cache"], "noise")
+
+    def test_normalize_manifest_keeps_explicit_empty_lists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = normalize_manifest(
+                {
+                    "profile": "full-home",
+                    "state_paths": [],
+                    "secret_paths": [],
+                    "install_targets": [],
+                    "pm2_ecosystems": [],
+                    "compose_projects": [],
+                },
+                tmp,
+            )
+            self.assertEqual(manifest["state_paths"], [])
+            self.assertEqual(manifest["secret_paths"], [])
+
+    def test_full_home_secret_discovery_ignores_examples_and_deep_test_fixtures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "melissa").mkdir()
+            (home / "melissa" / ".env").write_text("TOKEN=abc\n", encoding="utf-8")
+            (home / "nova-os" / ".env.example").parent.mkdir(parents=True)
+            (home / "nova-os" / ".env.example").write_text("EXAMPLE=1\n", encoding="utf-8")
+            deep_cert = home / "go" / "pkg" / "mod" / "vendor" / "tests" / "example-cert.pem"
+            deep_cert.parent.mkdir(parents=True)
+            deep_cert.write_text("CERT\n", encoding="utf-8")
+
+            discovered = discover_full_home_secret_paths(tmp)
+            self.assertIn(str(home / "melissa" / ".env"), discovered)
+            self.assertNotIn(str(home / "nova-os" / ".env.example"), discovered)
+            self.assertNotIn(str(deep_cert), discovered)
 
 
 if __name__ == "__main__":

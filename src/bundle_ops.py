@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from host_inventory import expand_path, is_excluded
+from host_inventory import build_state_exclude_patterns, expand_path, is_excluded
 
 
 def _timestamp() -> str:
@@ -83,6 +83,24 @@ def _iter_files(base_path: Path, exclude_patterns: Iterable[str]) -> Iterable[tu
             yield file_path, rel_path
 
 
+def _is_within_any(path: Path, roots: Iterable[Path]) -> bool:
+    try:
+        resolved_path = path.resolve()
+    except Exception:
+        return False
+
+    for root in roots:
+        try:
+            resolved_root = root.resolve()
+        except Exception:
+            continue
+        if resolved_path == resolved_root:
+            return True
+        if resolved_root in resolved_path.parents:
+            return True
+    return False
+
+
 def create_bundle(
     *,
     bundle_path: Path,
@@ -90,6 +108,7 @@ def create_bundle(
     paths: List[str],
     exclude_patterns: Iterable[str],
     kind: str,
+    excluded_paths: Iterable[str] | None = None,
 ) -> Path:
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     metadata = _metadata_blob(kind, manifest)
@@ -108,11 +127,14 @@ def create_bundle(
         metadata_info.size = len(metadata_bytes)
         archive.addfile(metadata_info, io.BytesIO(metadata_bytes))
 
+        excluded_roots = [Path(path).expanduser() for path in (excluded_paths or [])]
         for raw_path in paths:
             path_obj = Path(raw_path)
             if not path_obj.exists():
                 continue
             for file_path, rel_path in _iter_files(path_obj, exclude_patterns):
+                if excluded_roots and _is_within_any(file_path, excluded_roots):
+                    continue
                 try:
                     relative_to_host = file_path.resolve().relative_to(host_root)
                     arcname = str((host_prefix / relative_to_host).as_posix())
@@ -125,12 +147,16 @@ def create_bundle(
 
 def create_state_bundle(bundle_dir: Path, manifest: Dict[str, Any], bundle_path: Optional[Path] = None) -> Path:
     path = bundle_path or default_bundle_path(bundle_dir, "state_bundle", encrypted=False)
+    excluded_paths = list(manifest.get("secret_paths", [])) + list(manifest.get("state_exclude_paths", []))
+    excluded_paths.append(str(path))
+    excluded_paths.append(str(path.parent))
     return create_bundle(
         bundle_path=path,
         manifest=manifest,
         paths=list(manifest.get("state_paths", [])),
-        exclude_patterns=manifest.get("exclude_patterns", []),
+        exclude_patterns=build_state_exclude_patterns(manifest),
         kind="state",
+        excluded_paths=excluded_paths,
     )
 
 

@@ -1,28 +1,43 @@
 {
   "version": 1,
-  "profile": "production-clean",
+  "profile": "full-home",
   "generated_at": "2026-04-04T00:00:00Z",
   "host_root": "/home/ubuntu",
   "state_paths": [
-    "~/melissa",
-    "~/melissa-instances",
-    "~/whatsapp-bridge",
-    "~/nova-os",
-    "~/omni-core",
-    "~/Workflows-n8n",
-    "~/xus-https",
-    "~/.n8n",
-    "~/.nova",
-    "~/.pm2/dump.pm2"
+    "~/"
+  ],
+  "state_exclude_paths": [
+    "~/omni-core/backups/host-bundles",
+    "~/omni-core/logs",
+    "~/melissa-backups",
+    "~/backups-test",
+    "~/data-test",
+    "~/logs-test"
   ],
   "secret_paths": [
     "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    "~/.kube",
+    "~/.pki",
+    "~/.docker/config.json",
+    "~/.config/gh",
+    "~/.config/gcloud",
+    "~/.config/opencode",
     "~/.n8n/config",
-    "~/.nova",
+    "~/.git-credentials",
+    "~/.npmrc",
+    "~/.netrc",
+    "~/.pypirc",
+    "~/.appium.env",
+    "~/.env.nova",
     "~/melissa/.env",
     "~/melissa-instances/clinica-de-las-americas/.env",
     "~/whatsapp-bridge/.env",
-    "~/omni-core/.env"
+    "~/nova-os/.env",
+    "~/omni-core/.env",
+    "~/xus-https/.env",
+    "~/xus-core/.env"
   ],
   "install_targets": [
     "~/melissa",

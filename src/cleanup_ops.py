@@ -86,6 +86,8 @@ def build_purge_plan(
 ) -> List[Dict[str, Any]]:
     patterns = list(artifact_patterns or DEFAULT_ARTIFACT_PATTERNS)
     candidates: List[Dict[str, Any]] = []
+    host_root = Path(str(manifest.get("host_root") or "")).expanduser().resolve() if manifest.get("host_root") else None
+    omni_root = omni_home.expanduser().resolve()
 
     for extra_path, reason in (
         (bundle_dir, "bundles"),
@@ -100,7 +102,8 @@ def build_purge_plan(
         path = Path(str(raw_path)).expanduser()
         if not path.exists():
             continue
-        if path == omni_home:
+        resolved_path = path.resolve()
+        if resolved_path == omni_root or (host_root is not None and resolved_path == host_root):
             for artifact in collect_repo_artifacts(path, patterns):
                 _add_candidate(candidates, artifact, "repo_artifact")
             continue
