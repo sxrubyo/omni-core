@@ -1999,6 +1999,21 @@ class OmniCore:
             else:
                 warn(f"Missing {item['kind']} path: {item['path']}")
 
+        discovered = sorted(report["discovered"], key=lambda item: item.get("size_bytes", 0), reverse=True)
+        if discovered:
+            nl()
+            section("Top Dirs In Scope")
+            for item in discovered[:10]:
+                classification = str(item.get("classification", "uncategorized")).upper()
+                color = C.GRN if classification == "PRODUCT" else C.YLW if classification in {"NOISE", "SECRET"} else C.G3
+                label = f"{classification} :: {item['path']}"
+                kv(label, human_size(int(item.get("size_bytes", 0))), color=color, key_width=14)
+
+            if any(str(item.get("name")) == ".codex" for item in discovered):
+                nl()
+                hint("`.codex` está dentro de full-home porque el scope activo es /home/ubuntu completo.")
+                hint("Si luego quieres una captura más liviana, toca excluirlo explícitamente o usar production-clean.")
+
         if output:
             payload = {
                 "manifest_path": str(selected_path),

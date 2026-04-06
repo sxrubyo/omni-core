@@ -449,14 +449,16 @@ def is_excluded(rel_path: str, patterns: Iterable[str]) -> bool:
 def classify_path(path: Path, manifest: Dict[str, Any]) -> str:
     state_paths = [Path(item) for item in manifest.get("state_paths", [])]
     secret_paths = [Path(item) for item in manifest.get("secret_paths", [])]
-    if any(path == candidate or path.is_relative_to(candidate) for candidate in state_paths):
-        return "state"
     if any(path == candidate or path.is_relative_to(candidate) for candidate in secret_paths):
         return "secret"
+    if any(path == candidate for candidate in state_paths):
+        return "state"
     if path.name in CACHE_HINTS:
         return "noise"
     if path.name in PRODUCT_HINTS:
         return "product"
+    if any(path.is_relative_to(candidate) for candidate in state_paths):
+        return "state"
     return "uncategorized"
 
 

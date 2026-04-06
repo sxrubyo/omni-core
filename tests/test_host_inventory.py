@@ -14,6 +14,7 @@ from host_inventory import (  # noqa: E402
     build_default_manifest,
     build_profile_manifest,
     build_state_exclude_patterns,
+    classify_path,
     discover_full_home_secret_paths,
     ensure_manifest,
     expand_path,
@@ -75,6 +76,17 @@ class HostInventoryTests(unittest.TestCase):
             discovered = {item["name"]: item["classification"] for item in report["discovered"]}
             self.assertEqual(discovered["melissa"], "state")
             self.assertEqual(discovered[".cache"], "noise")
+
+    def test_classify_path_preserves_product_and_noise_hints_inside_full_home_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "melissa").mkdir()
+            (home / ".codex").mkdir()
+            manifest = build_profile_manifest("full-home", tmp)
+
+            self.assertEqual(classify_path(home / "melissa", manifest), "product")
+            self.assertEqual(classify_path(home / ".codex", manifest), "noise")
+            self.assertEqual(classify_path(home, manifest), "state")
 
     def test_normalize_manifest_keeps_explicit_empty_lists(self):
         with tempfile.TemporaryDirectory() as tmp:
