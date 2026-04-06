@@ -111,6 +111,14 @@ def build_powershell_auto_command(
     )
 
 
+def build_powershell_auto_script(command: str) -> str:
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$ProgressPreference = 'SilentlyContinue'\n\n"
+        f"{command}\n"
+    )
+
+
 def quote_powershell(value: str) -> str:
     escaped = value.replace("'", "''")
     return f"'{escaped}'"

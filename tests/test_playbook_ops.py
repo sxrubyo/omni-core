@@ -8,7 +8,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from playbook_ops import build_examples_catalog, build_powershell_auto_command  # noqa: E402
+from playbook_ops import build_examples_catalog, build_powershell_auto_command, build_powershell_auto_script  # noqa: E402
 
 
 class PlaybookOpsTests(unittest.TestCase):
@@ -41,6 +41,11 @@ class PlaybookOpsTests(unittest.TestCase):
         )
         self.assertIn("-TargetHost 'ec2-54-160-79-60.compute-1.amazonaws.com'", command)
         self.assertIn("-Destination '/home/ubuntu/omni-core'", command)
+
+    def test_powershell_auto_script_wraps_command(self):
+        script = build_powershell_auto_script("pwsh .\\bootstrap.ps1 `\n  -TargetHost 'host'")
+        self.assertIn("$ErrorActionPreference = 'Stop'", script)
+        self.assertIn("pwsh .\\bootstrap.ps1", script)
 
 
 if __name__ == "__main__":

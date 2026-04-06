@@ -60,10 +60,16 @@ Si Omni ya está instalado en el host, puedes pedirle el comando listo para pega
 omni auto --p
 ```
 
+Si además quieres que te deje el `.ps1` generado:
+
+```bash
+omni auto --p --ps1-out ./omni-auto.ps1
+```
+
 Con datos reales:
 
 ```bash
-omni auto --p --target-host ec2-54-160-79-60.compute-1.amazonaws.com --identity-file "C:\Users\santi\Downloads\materia oscura\llave_maestra_aws.pem" --dest /home/ubuntu/omni-core
+omni auto --p --target-host ec2-54-160-79-60.compute-1.amazonaws.com --identity-file "C:\Users\santi\Downloads\materia oscura\llave_maestra_aws.pem" --dest /home/ubuntu/omni-core --ps1-out ./omni-auto.ps1
 ```
 
 ## Qué necesitas antes

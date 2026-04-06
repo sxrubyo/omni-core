@@ -429,13 +429,20 @@ Para sacar el one-liner de PowerShell listo para pegar:
 omni auto --p
 ```
 
+Si además quieres que Omni te genere el archivo `.ps1`:
+
+```bash
+omni auto --p --ps1-out ./omni-auto.ps1
+```
+
 Con valores reales:
 
 ```bash
 omni auto --p \
   --target-host ec2-54-160-79-60.compute-1.amazonaws.com \
   --identity-file "C:\\Users\\santi\\Downloads\\materia oscura\\llave_maestra_aws.pem" \
-  --dest /home/ubuntu/omni-core
+  --dest /home/ubuntu/omni-core \
+  --ps1-out ./omni-auto.ps1
 ```
 
 Qué hace:
@@ -443,6 +450,7 @@ Qué hace:
 - imprime un `pwsh .\bootstrap.ps1 ...` listo para usar
 - si omites `--dest`, `bootstrap.ps1` escanea el host remoto y recomienda la ruta
 - deja `-InstallTimer` activo para que la actualización remota quede automatizada
+- si pasas `--ps1-out`, también escribe el script PowerShell listo en disco
 
 ## Mapa de comandos
 

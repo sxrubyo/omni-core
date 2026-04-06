@@ -56,6 +56,7 @@ from playbook_ops import (
     DEFAULT_REPO_URL,
     build_examples_catalog,
     build_powershell_auto_command,
+    build_powershell_auto_script,
 )
 from reconcile_ops import install_systemd_service, install_systemd_timer, reconcile_host
 from watch_ops import capture_watch_snapshot, load_watch_snapshot, save_watch_snapshot, summarize_snapshot_diff
@@ -1590,6 +1591,7 @@ class OmniCore:
         repo_url: str = DEFAULT_REPO_URL,
         ref_name: str = DEFAULT_REF_NAME,
         destination: str = "",
+        ps1_out: str = "",
     ):
         print_logo(compact=True)
         section("Omni Auto")
@@ -1598,10 +1600,7 @@ class OmniCore:
         kv("Auto backup", "on change + every 24h", color=C.GRN)
         nl()
         if powershell:
-            info("Comando listo para PowerShell")
-            dim("Si omites -Destination, bootstrap.ps1 escanea el host remoto y recomienda la ruta.")
-            print()
-            print(q(C.PRIMARY, build_powershell_auto_command(
+            command = build_powershell_auto_command(
                 target_host=target_host,
                 remote_user=remote_user,
                 identity_file=identity_file,
@@ -1609,13 +1608,23 @@ class OmniCore:
                 ref_name=ref_name,
                 destination=destination,
                 install_timer=True,
-            )))
+            )
+            info("Comando listo para PowerShell")
+            dim("Si omites -Destination, bootstrap.ps1 escanea el host remoto y recomienda la ruta.")
+            if ps1_out:
+                output_path = Path(ps1_out).expanduser()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(build_powershell_auto_script(command), encoding="utf-8")
+                ok(f"Script PowerShell generado en {output_path}")
+            print()
+            print(q(C.PRIMARY, command))
             nl()
             return
 
         bullet("Playbooks guiados  -> omni examples", C.GRN)
         bullet("One-liner PowerShell -> omni auto --p", C.GRN)
         dim("Añade --target-host y --identity-file si quieres que salga listo para pegar.")
+        dim("Añade --ps1-out ruta.ps1 si además quieres el archivo PowerShell generado.")
         nl()
 
     def agent_cmd(self, subaction: str = "", *, accept_all: bool = False):
@@ -2971,6 +2980,7 @@ def main():
     parser.add_argument("--identity-file", type=str, default="", help="Identity file for generated PowerShell auto commands")
     parser.add_argument("--repo-url", type=str, default=DEFAULT_REPO_URL, help="Repository URL for generated PowerShell auto commands")
     parser.add_argument("--ref-name", type=str, default=DEFAULT_REF_NAME, help="Git branch/ref for generated PowerShell auto commands")
+    parser.add_argument("--ps1-out", type=str, default="", help="Write generated PowerShell auto command to a .ps1 file")
     parser.add_argument("--context-lines", type=int, default=2, help="Context lines for rewrite previews")
     parser.add_argument("--apply", action="store_true", help="Apply changes for rewrite-style commands")
     parser.add_argument("--powershell", "--p", "-p", action="store_true", help="Render PowerShell-oriented output where supported")
@@ -3104,6 +3114,7 @@ def main():
                 repo_url=args.repo_url,
                 ref_name=args.ref_name,
                 destination=args.dest,
+                ps1_out=args.ps1_out,
             )
         elif action == "bridge":
             bridge_action = remaining[0] if remaining else ""
