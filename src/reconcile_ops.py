@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -28,6 +29,42 @@ def run_cmd(cmd: str, cwd: str | None = None) -> Tuple[int, str, str]:
     )
     stdout, stderr = process.communicate()
     return process.returncode, stdout.strip(), stderr.strip()
+
+
+def emit_progress(message: str) -> None:
+    print(f"  ·  {message}", flush=True)
+
+
+def should_stream_commands() -> bool:
+    return os.environ.get("OMNI_STREAM_OUTPUT", "1") != "0" and sys.stdout.isatty()
+
+
+def run_visible_cmd(cmd: str, cwd: str | None = None, *, label: str = "") -> Tuple[int, str, str]:
+    if not should_stream_commands():
+        return run_cmd(cmd, cwd=cwd)
+    if label:
+        emit_progress(label)
+    process = subprocess.Popen(
+        cmd,
+        shell=True,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    captured: List[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        text = line.rstrip("\n")
+        captured.append(text)
+        if text:
+            print(f"     {text}", flush=True)
+        else:
+            print("", flush=True)
+    returncode = process.wait()
+    stdout = "\n".join(captured).strip()
+    return returncode, stdout, ""
 
 
 def command_exists(name: str) -> bool:
@@ -93,9 +130,10 @@ def install_apt_packages(packages: List[str]) -> Dict[str, Any]:
             missing.append(resolved_name)
     if not missing:
         return {"changed": [], "skipped": skipped, "unavailable": unavailable, "resolved": resolved}
-    run_cmd("sudo apt-get update")
-    code, out, err = run_cmd(
-        "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y " + " ".join(missing)
+    run_visible_cmd("sudo apt-get update", label="Actualizando índices APT")
+    code, out, err = run_visible_cmd(
+        "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y " + " ".join(missing),
+        label="Instalando paquetes APT: " + ", ".join(missing),
     )
     if code != 0:
         raise RuntimeError(err or out or "apt install failed")
@@ -114,9 +152,15 @@ def install_npm_global_packages(packages: List[str]) -> Dict[str, Any]:
             missing.append(package)
     if not missing:
         return {"changed": [], "skipped": requested}
-    code, out, err = run_cmd(build_npm_global_install_command(missing))
+    code, out, err = run_visible_cmd(
+        build_npm_global_install_command(missing),
+        label="Instalando paquetes npm globales: " + ", ".join(missing),
+    )
     if code != 0 and "EACCES" in (err or out) and command_exists("sudo"):
-        code, out, err = run_cmd("sudo npm install -g " + " ".join(missing))
+        code, out, err = run_visible_cmd(
+            "sudo npm install -g " + " ".join(missing),
+            label="Reintentando npm global con sudo",
+        )
     if code != 0:
         raise RuntimeError(err or out or "npm global install failed")
     return {"changed": missing, "skipped": [pkg for pkg in requested if pkg not in missing]}
@@ -147,10 +191,10 @@ def ensure_supported_node_runtime(min_major: int = 16, target_major: int = 20) -
     else:
         setup_cmd = f"curl -fsSL https://deb.nodesource.com/setup_{target_major}.x | bash -"
         install_cmd = "DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs"
-    code, out, err = run_cmd(setup_cmd)
+    code, out, err = run_visible_cmd(setup_cmd, label=f"Actualizando Node.js a la rama {target_major}.x")
     if code != 0:
         raise RuntimeError(err or out or "NodeSource setup failed")
-    code, out, err = run_cmd(install_cmd)
+    code, out, err = run_visible_cmd(install_cmd, label="Instalando nodejs")
     if code != 0:
         raise RuntimeError(err or out or "nodejs install failed")
     return {"changed": True, "current_major": current_major, "target_major": target_major}
@@ -201,7 +245,10 @@ def install_python_packages(packages: List[str]) -> Dict[str, Any]:
     if not missing:
         return {"changed": [], "skipped": requested}
 
-    code, out, err = run_cmd("python3 -m pip install " + " ".join(shlex.quote(pkg) for pkg in missing))
+    code, out, err = run_visible_cmd(
+        "python3 -m pip install " + " ".join(shlex.quote(pkg) for pkg in missing),
+        label="Instalando paquetes Python: " + ", ".join(missing),
+    )
     if code != 0:
         raise RuntimeError(err or out or "python package install failed")
     return {"changed": missing, "skipped": [pkg for pkg in requested if pkg not in missing]}
@@ -234,17 +281,19 @@ def clone_or_update_repos(repo_entries: List[Any]) -> List[Dict[str, Any]]:
 
         path.parent.mkdir(parents=True, exist_ok=True)
         if (path / ".git").exists():
-            code, out, err = run_cmd(
+            code, out, err = run_visible_cmd(
                 f"git -C {shlex.quote(str(path))} fetch --all --prune && "
                 f"git -C {shlex.quote(str(path))} checkout {shlex.quote(ref)} && "
-                f"git -C {shlex.quote(str(path))} pull --ff-only origin {shlex.quote(ref)}"
+                f"git -C {shlex.quote(str(path))} pull --ff-only origin {shlex.quote(ref)}",
+                label=f"Actualizando repo {name}",
             )
             if code != 0:
                 raise RuntimeError(err or out or f"git update failed for {name}")
             status = "updated"
         else:
-            code, out, err = run_cmd(
-                f"git clone --branch {shlex.quote(ref)} {shlex.quote(url)} {shlex.quote(str(path))}"
+            code, out, err = run_visible_cmd(
+                f"git clone --branch {shlex.quote(ref)} {shlex.quote(url)} {shlex.quote(str(path))}",
+                label=f"Clonando repo {name}",
             )
             if code != 0:
                 raise RuntimeError(err or out or f"git clone failed for {name}")
@@ -264,12 +313,16 @@ def install_project_dependencies(targets: List[str]) -> List[Dict[str, Any]]:
         requirements = path / "requirements.txt"
         package_json = path / "package.json"
         if requirements.exists():
-            code, out, err = run_cmd(f"python3 -m pip install -r {shlex.quote(str(requirements))}", cwd=str(path))
+            code, out, err = run_visible_cmd(
+                f"python3 -m pip install -r {shlex.quote(str(requirements))}",
+                cwd=str(path),
+                label=f"Instalando requirements en {path}",
+            )
             if code != 0:
                 raise RuntimeError(err or out or f"pip install failed for {path}")
             actions.append("pip")
         if package_json.exists():
-            code, out, err = run_cmd("npm install", cwd=str(path))
+            code, out, err = run_visible_cmd("npm install", cwd=str(path), label=f"Ejecutando npm install en {path}")
             if code != 0:
                 raise RuntimeError(err or out or f"npm install failed for {path}")
             actions.append("npm")
@@ -293,7 +346,11 @@ def start_compose_projects(projects: List[str]) -> List[Dict[str, Any]]:
         if not compose_file:
             results.append({"path": str(project), "status": "skipped"})
             continue
-        code, out, err = run_cmd(build_compose_up_command(compose_file), cwd=str(project))
+        code, out, err = run_visible_cmd(
+            build_compose_up_command(compose_file),
+            cwd=str(project),
+            label=f"Levantando Compose en {project}",
+        )
         if code != 0:
             raise RuntimeError(err or out or f"docker compose failed for {project}")
         results.append({"path": str(project), "status": "started", "compose_file": str(compose_file)})
@@ -305,7 +362,7 @@ def restore_pm2(pm2_dump: str, ecosystems: List[str]) -> Dict[str, Any]:
         return {"status": "missing_pm2"}
     dump_path = Path(expand_path(pm2_dump)) if pm2_dump else None
     if dump_path and dump_path.exists():
-        code, out, err = run_cmd("pm2 resurrect")
+        code, out, err = run_visible_cmd("pm2 resurrect", label="Restaurando procesos PM2")
         if code == 0:
             run_cmd("pm2 save")
             return {"status": "resurrected", "source": str(dump_path)}
@@ -314,7 +371,11 @@ def restore_pm2(pm2_dump: str, ecosystems: List[str]) -> Dict[str, Any]:
         ecosystem = Path(expand_path(raw))
         if not ecosystem.exists():
             continue
-        code, out, err = run_cmd(f"pm2 start {shlex.quote(str(ecosystem))} --update-env", cwd=str(ecosystem.parent))
+        code, out, err = run_visible_cmd(
+            f"pm2 start {shlex.quote(str(ecosystem))} --update-env",
+            cwd=str(ecosystem.parent),
+            label=f"Iniciando PM2 con {ecosystem}",
+        )
         if code != 0:
             raise RuntimeError(err or out or f"pm2 start failed for {ecosystem}")
         started.append(str(ecosystem))
@@ -422,25 +483,32 @@ def reconcile_host(
     report: Dict[str, Any] = {"steps": []}
 
     if bundle_path:
+        emit_progress(f"Restaurando estado desde {bundle_path}")
         restored = restore_bundle(Path(bundle_path), target_root=target_root)
         report["steps"].append({"name": "restore_state", "restored": len(restored)})
 
     if secrets_path:
+        emit_progress(f"Restaurando secretos desde {secrets_path}")
         restored = restore_bundle(Path(secrets_path), target_root=target_root, passphrase=passphrase)
         report["steps"].append({"name": "restore_secrets", "restored": len(restored)})
 
+    emit_progress("Diagnosticando paquetes del sistema")
     apt_res = install_apt_packages(list(manifest.get("apt_packages", [])))
     report["steps"].append({"name": "apt", **apt_res})
 
+    emit_progress("Diagnosticando paquetes Python")
     python_res = install_python_packages(list(manifest.get("python_packages", [])))
     report["steps"].append({"name": "python_packages", **python_res})
 
+    emit_progress("Diagnosticando paquetes npm globales")
     npm_res = install_npm_global_packages(list(manifest.get("npm_global_packages", [])))
     report["steps"].append({"name": "npm_global", **npm_res})
 
+    emit_progress("Sincronizando repositorios definidos")
     repo_res = clone_or_update_repos(repos or [])
     report["steps"].append({"name": "repos", "results": repo_res})
 
+    emit_progress("Instalando dependencias por proyecto")
     install_res = install_project_dependencies(list(manifest.get("install_targets", [])))
     report["steps"].append({"name": "install_targets", "results": install_res})
 
@@ -448,6 +516,7 @@ def reconcile_host(
         hook_res = before_services(report) or {}
         report["steps"].append({"name": "before_services", **hook_res})
 
+    emit_progress("Levantando servicios Compose")
     compose_res = start_compose_projects(list(manifest.get("compose_projects", [])))
     report["steps"].append({"name": "compose", "results": compose_res})
 
@@ -456,6 +525,7 @@ def reconcile_host(
         if candidate.endswith("dump.pm2"):
             pm2_dump = candidate
             break
+    emit_progress("Restaurando servicios PM2")
     pm2_res = restore_pm2(pm2_dump, list(manifest.get("pm2_ecosystems", [])))
     report["steps"].append({"name": "pm2", **pm2_res})
 
