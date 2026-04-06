@@ -119,6 +119,31 @@ def build_powershell_auto_script(command: str) -> str:
     )
 
 
+def build_windows_ps1_path(windows_dir: str, filename: str = "omni-auto.ps1") -> str:
+    normalized = windows_dir.strip().rstrip("\\/")
+    return f"{normalized}\\{filename}"
+
+
+def build_powershell_dropper_script(
+    command: str,
+    *,
+    windows_dir: str,
+    filename: str = "omni-auto.ps1",
+) -> str:
+    target_path = build_windows_ps1_path(windows_dir, filename)
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$ProgressPreference = 'SilentlyContinue'\n"
+        f"$OmniWindowsDir = {quote_powershell(windows_dir)}\n"
+        "$null = New-Item -ItemType Directory -Force -Path $OmniWindowsDir\n"
+        f"$OmniScript = {quote_powershell(target_path)}\n"
+        "@'\n"
+        f"{build_powershell_auto_script(command).rstrip()}\n"
+        "'@ | Set-Content -Path $OmniScript -Encoding UTF8\n"
+        'Write-Host "Generated $OmniScript"\n'
+    )
+
+
 def quote_powershell(value: str) -> str:
     escaped = value.replace("'", "''")
     return f"'{escaped}'"

@@ -66,10 +66,16 @@ Si además quieres que te deje el `.ps1` generado:
 omni auto --p --ps1-out ./omni-auto.ps1
 ```
 
+Si quieres que Omni te deje el bloque para crearlo directo en tu carpeta Windows:
+
+```bash
+omni auto --p --windows-dir "C:\Users\santi\Downloads\Projects\Ubuntu"
+```
+
 Con datos reales:
 
 ```bash
-omni auto --p --target-host ec2-54-160-79-60.compute-1.amazonaws.com --identity-file "C:\Users\santi\Downloads\materia oscura\llave_maestra_aws.pem" --dest /home/ubuntu/omni-core --ps1-out ./omni-auto.ps1
+omni auto --p --target-host ec2-54-160-79-60.compute-1.amazonaws.com --identity-file "C:\Users\santi\Downloads\materia oscura\llave_maestra_aws.pem" --dest /home/ubuntu/omni-core --ps1-out ./omni-auto.ps1 --windows-dir "C:\Users\santi\Downloads\Projects\Ubuntu"
 ```
 
 ## Qué necesitas antes

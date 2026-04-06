@@ -435,6 +435,12 @@ Si además quieres que Omni te genere el archivo `.ps1`:
 omni auto --p --ps1-out ./omni-auto.ps1
 ```
 
+Si quieres que Omni además te deje el bloque para crear el archivo directamente dentro de una carpeta Windows:
+
+```bash
+omni auto --p --windows-dir "C:\Users\santi\Downloads\Projects\Ubuntu"
+```
+
 Con valores reales:
 
 ```bash
@@ -442,7 +448,8 @@ omni auto --p \
   --target-host ec2-54-160-79-60.compute-1.amazonaws.com \
   --identity-file "C:\\Users\\santi\\Downloads\\materia oscura\\llave_maestra_aws.pem" \
   --dest /home/ubuntu/omni-core \
-  --ps1-out ./omni-auto.ps1
+  --ps1-out ./omni-auto.ps1 \
+  --windows-dir "C:\\Users\\santi\\Downloads\\Projects\\Ubuntu"
 ```
 
 Qué hace:
@@ -451,6 +458,7 @@ Qué hace:
 - si omites `--dest`, `bootstrap.ps1` escanea el host remoto y recomienda la ruta
 - deja `-InstallTimer` activo para que la actualización remota quede automatizada
 - si pasas `--ps1-out`, también escribe el script PowerShell listo en disco
+- si pasas `--windows-dir`, además imprime el bloque listo para crear `omni-auto.ps1` dentro de esa carpeta Windows
 
 ## Mapa de comandos
 

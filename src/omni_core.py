@@ -56,7 +56,9 @@ from playbook_ops import (
     DEFAULT_REPO_URL,
     build_examples_catalog,
     build_powershell_auto_command,
+    build_powershell_dropper_script,
     build_powershell_auto_script,
+    build_windows_ps1_path,
 )
 from reconcile_ops import install_systemd_service, install_systemd_timer, reconcile_host
 from watch_ops import capture_watch_snapshot, load_watch_snapshot, save_watch_snapshot, summarize_snapshot_diff
@@ -1592,6 +1594,7 @@ class OmniCore:
         ref_name: str = DEFAULT_REF_NAME,
         destination: str = "",
         ps1_out: str = "",
+        windows_dir: str = "",
     ):
         print_logo(compact=True)
         section("Omni Auto")
@@ -1616,8 +1619,16 @@ class OmniCore:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(build_powershell_auto_script(command), encoding="utf-8")
                 ok(f"Script PowerShell generado en {output_path}")
+            if windows_dir.strip():
+                kv("Windows dir", windows_dir, color=C.GRN)
+                kv("Suggested .ps1", build_windows_ps1_path(windows_dir), color=C.GRN)
             print()
             print(q(C.PRIMARY, command))
+            if windows_dir.strip():
+                print()
+                info("Bloque listo para crear el .ps1 en Windows")
+                print()
+                print(q(C.PRIMARY, build_powershell_dropper_script(command, windows_dir=windows_dir)))
             nl()
             return
 
@@ -1625,6 +1636,7 @@ class OmniCore:
         bullet("One-liner PowerShell -> omni auto --p", C.GRN)
         dim("Añade --target-host y --identity-file si quieres que salga listo para pegar.")
         dim("Añade --ps1-out ruta.ps1 si además quieres el archivo PowerShell generado.")
+        dim("Añade --windows-dir C:\\ruta\\carpeta para que Omni te dé el bloque que crea omni-auto.ps1 en Windows.")
         nl()
 
     def agent_cmd(self, subaction: str = "", *, accept_all: bool = False):
@@ -2981,6 +2993,7 @@ def main():
     parser.add_argument("--repo-url", type=str, default=DEFAULT_REPO_URL, help="Repository URL for generated PowerShell auto commands")
     parser.add_argument("--ref-name", type=str, default=DEFAULT_REF_NAME, help="Git branch/ref for generated PowerShell auto commands")
     parser.add_argument("--ps1-out", type=str, default="", help="Write generated PowerShell auto command to a .ps1 file")
+    parser.add_argument("--windows-dir", type=str, default="", help="Windows directory where omni-auto.ps1 should be created")
     parser.add_argument("--context-lines", type=int, default=2, help="Context lines for rewrite previews")
     parser.add_argument("--apply", action="store_true", help="Apply changes for rewrite-style commands")
     parser.add_argument("--powershell", "--p", "-p", action="store_true", help="Render PowerShell-oriented output where supported")
@@ -3115,6 +3128,7 @@ def main():
                 ref_name=args.ref_name,
                 destination=args.dest,
                 ps1_out=args.ps1_out,
+                windows_dir=args.windows_dir,
             )
         elif action == "bridge":
             bridge_action = remaining[0] if remaining else ""

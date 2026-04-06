@@ -8,7 +8,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from playbook_ops import build_examples_catalog, build_powershell_auto_command, build_powershell_auto_script  # noqa: E402
+from playbook_ops import (  # noqa: E402
+    build_examples_catalog,
+    build_powershell_auto_command,
+    build_powershell_auto_script,
+    build_powershell_dropper_script,
+    build_windows_ps1_path,
+)
 
 
 class PlaybookOpsTests(unittest.TestCase):
@@ -46,6 +52,21 @@ class PlaybookOpsTests(unittest.TestCase):
         script = build_powershell_auto_script("pwsh .\\bootstrap.ps1 `\n  -TargetHost 'host'")
         self.assertIn("$ErrorActionPreference = 'Stop'", script)
         self.assertIn("pwsh .\\bootstrap.ps1", script)
+
+    def test_windows_ps1_path_appends_default_filename(self):
+        self.assertEqual(
+            build_windows_ps1_path(r"C:\Users\santi\Downloads\Projects\Ubuntu"),
+            r"C:\Users\santi\Downloads\Projects\Ubuntu\omni-auto.ps1",
+        )
+
+    def test_powershell_dropper_script_creates_script_in_windows_dir(self):
+        dropper = build_powershell_dropper_script(
+            "pwsh .\\bootstrap.ps1 `\n  -TargetHost 'host'",
+            windows_dir=r"C:\Users\santi\Downloads\Projects\Ubuntu",
+        )
+        self.assertIn("$OmniWindowsDir = 'C:\\Users\\santi\\Downloads\\Projects\\Ubuntu'", dropper)
+        self.assertIn("omni-auto.ps1", dropper)
+        self.assertIn("Set-Content -Path $OmniScript -Encoding UTF8", dropper)
 
 
 if __name__ == "__main__":
