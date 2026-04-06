@@ -252,6 +252,7 @@ def profile_presets(home_root: str = "/home/ubuntu") -> Dict[str, Dict[str, Any]
         "secret_paths": full_home_secret_paths,
         "state_exclude_paths": [
             expand_path("~/omni-core/backups/host-bundles", home_root),
+            expand_path("~/omni-core/backups/auto-bundles", home_root),
         ],
         "install_targets": list(DEFAULT_INSTALL_TARGETS),
         "pm2_ecosystems": list(DEFAULT_PM2_ECOSYSTEMS),

@@ -44,6 +44,7 @@ class HostInventoryTests(unittest.TestCase):
             self.assertTrue(any(path.endswith(".ssh") for path in manifest["secret_paths"]))
             self.assertTrue(any(path.endswith(".env") for path in manifest["secret_paths"]))
             self.assertFalse(any(path.endswith("dump.pm2") for path in manifest["secret_paths"]))
+            self.assertTrue(any(path.endswith("backups/auto-bundles") for path in manifest["state_exclude_paths"]))
             patterns = build_state_exclude_patterns(manifest, tmp)
             self.assertIn(".ssh", patterns)
             self.assertIn(".env", patterns)

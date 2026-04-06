@@ -27,7 +27,12 @@ from bundle_ops import (
     latest_or_explicit,
     restore_bundle,
 )
-from bridge_ops import load_capture_summary, summarize_bundle_pair, write_capture_summary
+from bridge_ops import (
+    build_host_rewrite_context,
+    load_capture_summary,
+    summarize_bundle_pair,
+    write_capture_summary,
+)
 from cleanup_ops import build_purge_plan, execute_purge
 from host_inventory import (
     DEFAULT_PROFILE,
@@ -52,6 +57,7 @@ CONFIG_DIR = Path(os.environ.get("OMNI_CONFIG_DIR", OMNI_HOME / "config")).resol
 STATE_DIR = Path(os.environ.get("OMNI_STATE_DIR", OMNI_HOME / "data")).resolve()
 BACKUP_DIR = Path(os.environ.get("OMNI_BACKUP_DIR", OMNI_HOME / "backups")).resolve()
 BUNDLE_DIR = Path(os.environ.get("OMNI_BUNDLE_DIR", BACKUP_DIR / "host-bundles")).resolve()
+AUTO_BUNDLE_DIR = Path(os.environ.get("OMNI_AUTO_BUNDLE_DIR", BACKUP_DIR / "auto-bundles")).resolve()
 LOG_DIR = Path(os.environ.get("OMNI_LOG_DIR", OMNI_HOME / "logs")).resolve()
 ENV_FILE = Path(os.environ.get("OMNI_ENV_FILE", OMNI_HOME / ".env")).resolve()
 TASKS_FILE = Path(os.environ.get("OMNI_TASKS_FILE", OMNI_HOME / "tasks.json")).resolve()
@@ -60,6 +66,8 @@ SERVERS_FILE = Path(os.environ.get("OMNI_SERVERS_FILE", CONFIG_DIR / "servers.js
 SYSTEM_MANIFEST_FILE = Path(
     os.environ.get("OMNI_MANIFEST_FILE", CONFIG_DIR / "system_manifest.json")
 ).resolve()
+AUTO_BACKUP_ON_CHANGE = os.environ.get("OMNI_AUTO_BACKUP_ON_CHANGE", "1").strip().lower() in {"1", "true", "yes", "on"}
+AUTO_BACKUP_KEEP = max(1, int(os.environ.get("OMNI_AUTO_BACKUP_KEEP", "5")))
 
 
 def load_env_file(env_path: Path) -> None:
@@ -687,16 +695,32 @@ class ProgressBar:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SystemFixer:
-    def run_cmd(self, cmd: str, shell=True) -> Tuple[int, str, str]:
+    def __init__(self):
+        self.platform_info = detect_platform_info()
+
+    def run_cmd(self, cmd: str, shell=True, timeout: int = 15) -> Tuple[int, str, str]:
         try:
             proc = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = proc.communicate()
+            stdout, stderr = proc.communicate(timeout=timeout)
             return proc.returncode, stdout.strip(), stderr.strip()
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            return -1, stdout.strip(), (stderr.strip() or f"Command timed out after {timeout}s")
         except Exception as e:
             logger.error(f"Error running command '{cmd}': {e}")
             return -1, "", str(e)
 
     def check_disk_space(self, threshold_percent=90) -> Dict:
+        if self.platform_info.system == "windows":
+            usage = shutil.disk_usage(Path.home().anchor or str(Path.home()))
+            usage_percent = int((usage.used / usage.total) * 100) if usage.total else 0
+            return {
+                "status": "ok",
+                "usage_percent": usage_percent,
+                "free": human_size(usage.free),
+                "message": f"Disk usage: {usage_percent}% (Windows fallback)",
+            }
         code, out, err = self.run_cmd("df -h /")
         if code != 0:
             return {"status": "error", "message": f"Failed to check disk: {err}"}
@@ -722,6 +746,40 @@ class SystemFixer:
             return {"status": "error", "message": f"Failed to parse df output: {e}"}
 
     def check_memory(self) -> Dict:
+        if self.platform_info.system == "windows":
+            try:
+                import ctypes
+
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+
+                status = MEMORYSTATUSEX()
+                status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+                total = int(status.ullTotalPhys / (1024 * 1024))
+                available = int(status.ullAvailPhys / (1024 * 1024))
+                used = max(total - available, 0)
+                percent = (used / total) * 100 if total else 0
+                return {
+                    "status": "ok",
+                    "total_mb": total,
+                    "used_mb": used,
+                    "available_mb": available,
+                    "percent": percent,
+                    "message": f"Memory: {used}/{total}MB ({percent:.1f}%) (Windows fallback)",
+                }
+            except Exception as e:
+                return {"status": "error", "message": f"Windows memory probe failed: {e}"}
         code, out, _ = self.run_cmd("free -m")
         if code != 0:
             return {"status": "error"}
@@ -737,6 +795,8 @@ class SystemFixer:
             return {"status": "error", "message": str(e)}
 
     def check_and_fix_pm2(self) -> Dict:
+        if self.platform_info.system == "windows":
+            return {"status": "skipped", "message": "PM2 check skipped on Windows local shell. Use a remote Linux host for process supervision."}
         code, out, err = self.run_cmd("pm2 jlist")
         if code != 0:
             return {"status": "error", "message": "PM2 not found or error"}
@@ -892,7 +952,7 @@ class OmniCore:
         self.load_tasks()
 
     def ensure_runtime_dirs(self):
-        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, LOG_DIR):
+        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, AUTO_BUNDLE_DIR, LOG_DIR):
             path.mkdir(parents=True, exist_ok=True)
 
     def load_repo_entries(self) -> List[Any]:
@@ -1040,6 +1100,54 @@ class OmniCore:
             candidate = candidate.parent
         candidate.mkdir(parents=True, exist_ok=True)
         return candidate
+
+    def auto_backup_dir(self) -> Path:
+        AUTO_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+        return AUTO_BUNDLE_DIR
+
+    def prune_bundle_dir(self, bundle_dir: Path, keep: int = AUTO_BACKUP_KEEP) -> None:
+        for pattern in ("state_bundle_*", "secrets_bundle_*", "capture_summary_*.json"):
+            candidates = sorted(bundle_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
+            for stale in candidates[keep:]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    continue
+
+    def create_recovery_pack(
+        self,
+        *,
+        manifest_path: str = "",
+        home_root: str = "",
+        output: str = "",
+        passphrase_env: str = "OMNI_SECRET_PASSPHRASE",
+        profile: str = "",
+        bundle_dir: Path | None = None,
+        prune: bool = False,
+    ) -> Dict[str, Any]:
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
+        target_dir = bundle_dir or self.capture_output_dir(output)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        passphrase = self.read_passphrase(passphrase_env)
+        state_bundle = create_state_bundle(target_dir, manifest)
+        secrets_bundle = create_secrets_bundle(target_dir, manifest, passphrase=passphrase)
+        summary_path = write_capture_summary(
+            bundle_dir=target_dir,
+            manifest_path=selected_path,
+            state_bundle=state_bundle,
+            secrets_bundle=secrets_bundle,
+        )
+        if prune:
+            self.prune_bundle_dir(target_dir, keep=AUTO_BACKUP_KEEP)
+        return {
+            "manifest_path": str(selected_path),
+            "manifest": manifest,
+            "bundle_dir": str(target_dir),
+            "state_bundle": str(state_bundle),
+            "secrets_bundle": str(secrets_bundle),
+            "summary_path": str(summary_path),
+            "encrypted": bool(passphrase),
+        }
 
     def is_interactive(self) -> bool:
         return bool(getattr(sys.stdin, "isatty", lambda: False)()) and bool(getattr(sys.stdout, "isatty", lambda: False)())
@@ -1244,9 +1352,9 @@ class OmniCore:
         mem = self.fixer.check_memory()
         pm2 = self.fixer.check_and_fix_pm2()
 
-        kv("Disk Usage", disk.get('message', 'Unknown'), color=C.GRN if disk.get('status') == 'ok' else C.RED)
-        kv("Memory", mem.get('message', 'Unknown'), color=C.GRN if mem.get('status') == 'ok' else C.YLW)
-        kv("PM2 Processes", f"{pm2.get('total_processes', 0)} running", color=C.GRN if not pm2.get('restarted') else C.YLW)
+        kv("Disk Usage", disk.get('message', 'Unknown'), color=C.GRN if disk.get('status') in {'ok', 'skipped'} else C.RED)
+        kv("Memory", mem.get('message', 'Unknown'), color=C.GRN if mem.get('status') in {'ok', 'skipped'} else C.YLW)
+        kv("PM2 Processes", pm2.get('message', f"{pm2.get('total_processes', 0)} running"), color=C.GRN if pm2.get('status') in {'ok', 'skipped'} and not pm2.get('restarted') else C.YLW)
 
         nl()
         bullet("Repositories synced", C.GRN)
@@ -1278,21 +1386,29 @@ class OmniCore:
             else:
                 sp.finish("Failed to restart services", success=False)
 
-    def run_backup(self, target=None):
-        """Create system backup."""
+    def run_backup(self, target=None, manifest_path: str = "", home_root: str = "", passphrase_env: str = "OMNI_SECRET_PASSPHRASE", profile: str = ""):
+        """Create a real recovery pack in auto-bundles."""
         print_logo(compact=True)
         section("System Backup")
 
-        target = target or os.path.join(self.root_dir, "backups", f"omni_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-
         with Spinner("Creating backup...", color=C.PRIMARY) as sp:
             try:
-                # Backup tasks.json
-                if os.path.exists(self.tasks_file):
-                    shutil.copy(self.tasks_file, target + "_tasks.json")
-                sp.finish(f"Backup saved to {target}", success=True)
+                target_dir = self.capture_output_dir(str(target)) if target else self.auto_backup_dir()
+                pack = self.create_recovery_pack(
+                    manifest_path=manifest_path,
+                    home_root=home_root,
+                    output=str(target_dir),
+                    passphrase_env=passphrase_env,
+                    profile=profile,
+                    bundle_dir=target_dir,
+                    prune=(not target),
+                )
+                sp.finish(f"Backup saved to {pack['bundle_dir']}", success=True)
+                ok(f"State bundle: {pack['state_bundle']}")
+                ok(f"Secrets bundle: {pack['secrets_bundle']}")
+                ok(f"Summary: {pack['summary_path']}")
+                if not pack["encrypted"]:
+                    warn("Secrets bundle exported without encryption. Set OMNI_SECRET_PASSPHRASE to encrypt automatic backups.")
             except Exception as e:
                 sp.finish(f"Backup failed: {e}", success=False)
 
@@ -1433,8 +1549,9 @@ class OmniCore:
         requested_profile = str(profile or "").strip().lower().replace("_", "-")
         manifest_path = CONFIG_DIR / "system_manifest.json"
         manifest_was_present = manifest_path.exists()
+        workspace_changed = False
 
-        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, LOG_DIR):
+        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, AUTO_BUNDLE_DIR, LOG_DIR):
             path.mkdir(parents=True, exist_ok=True)
 
         template_pairs = [
@@ -1455,6 +1572,7 @@ class OmniCore:
             if template.exists():
                 shutil.copy2(template, target)
                 created.append(target)
+                workspace_changed = True
             else:
                 missing_templates.append(template)
 
@@ -1479,6 +1597,7 @@ class OmniCore:
                 existing.append(manifest_path)
             else:
                 created.append(manifest_path)
+            workspace_changed = True
             ok(f"Activated profile {manifest['profile']} in {manifest_path}")
 
         servers_path = CONFIG_DIR / "servers.json"
@@ -1497,6 +1616,7 @@ class OmniCore:
                     if changed:
                         servers_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
                         self.servers = self.load_servers()
+                        workspace_changed = True
                         ok(f"Updated placeholder host in {servers_path} -> {replacement_host}")
             except Exception as err:
                 warn(f"Failed to normalize servers.json automatically: {err}")
@@ -1507,6 +1627,10 @@ class OmniCore:
             dim(f"Already present: {path}")
         for path in missing_templates:
             warn(f"Template not found: {path}")
+
+        if workspace_changed and AUTO_BACKUP_ON_CHANGE:
+            info("Creando backup automático post-init...")
+            self.run_backup(profile=requested_profile or profile)
 
         nl()
         bullet("Next steps", C.PRIMARY, bold=True)
@@ -1539,6 +1663,13 @@ class OmniCore:
         kv("Detected Platform", f"{info_obj.system} / {info_obj.shell} / {info_obj.package_manager}", color=C.GRN)
         kv("Mode", "accept-all" if effective_accept_all else "guided", color=C.YLW if effective_accept_all else C.GRN)
         kv("Default Scope", profile, color=C.GRN)
+        scan_root = str(Path.home())
+        if self.manifest_path.exists():
+            try:
+                scan_root = str(load_manifest(self.manifest_path, str(Path.home())).get("host_root", scan_root))
+            except Exception:
+                pass
+        self.render_host_drift_summary(self.build_host_drift_report(root=scan_root), compact=True)
         nl()
         flow_options = build_flow_options(info_obj)
 
@@ -1602,14 +1733,23 @@ class OmniCore:
         mem = self.fixer.check_memory()
         pm2 = self.fixer.check_and_fix_pm2()
 
-        kv("Disk", disk.get("message", "Unknown"), color=C.GRN if disk.get("status") == "ok" else C.YLW)
-        kv("Memory", mem.get("message", "Unknown"), color=C.GRN if mem.get("status") == "ok" else C.YLW)
-        kv("PM2", pm2.get("message", "Unknown"), color=C.GRN if not pm2.get("restarted") else C.YLW)
+        kv("Disk", disk.get("message", "Unknown"), color=C.GRN if disk.get("status") in {"ok", "skipped"} else C.YLW)
+        kv("Memory", mem.get("message", "Unknown"), color=C.GRN if mem.get("status") in {"ok", "skipped"} else C.YLW)
+        kv("PM2", pm2.get("message", "Unknown"), color=C.GRN if pm2.get("status") in {"ok", "skipped"} and not pm2.get("restarted") else C.YLW)
         kv("Manifest", str(self.manifest_path), color=C.GRN)
         try:
             manifest = load_manifest(self.manifest_path, str(Path.home()))
             kv("Profile", str(manifest.get("profile", "unknown")), color=C.GRN)
             kv("Host Root", str(manifest.get("host_root", "unknown")), color=C.GRN)
+            drift = self.build_host_drift_report(root=str(manifest.get("host_root", str(Path.home()))))
+            context = drift["context"]
+            plan = drift["plan"]
+            if not context["summary_found"]:
+                kv("Host Drift", "No capture summary yet", color=C.G3)
+            elif plan and plan.changed_files:
+                kv("Host Drift", f"{plan.changed_files} files need rewrite", color=C.YLW)
+            else:
+                kv("Host Drift", "Aligned or no matches", color=C.GRN)
         except Exception:
             pass
         kv("Bundle Dir", str(self.bundle_dir), color=C.GRN)
@@ -1635,6 +1775,46 @@ class OmniCore:
                     warn(f"Placeholder host still present in servers.json for {server.get('name', 'server')}")
                 else:
                     ok(f"Remote server configured: {server.get('name', host)} -> {host}")
+
+    def build_host_drift_report(
+        self,
+        root: str = "",
+        *,
+        target_public_ip: str = "",
+        target_private_ip: str = "",
+        target_hostname: str = "",
+    ) -> Dict[str, Any]:
+        scan_root = Path(root).expanduser() if root else Path.home()
+        context = build_host_rewrite_context(
+            self.bundle_dir,
+            target_public_ip=target_public_ip,
+            target_private_ip=target_private_ip,
+            target_hostname=target_hostname,
+        )
+        plan = build_rewrite_plan(scan_root, context["replacements"]) if context["replacements"] else None
+        return {
+            "scan_root": str(scan_root),
+            "context": context,
+            "plan": plan,
+            "changed_files": plan.changed_files if plan else 0,
+            "total_replacements": plan.total_replacements if plan else 0,
+        }
+
+    def render_host_drift_summary(self, drift: Dict[str, Any], *, compact: bool = False) -> None:
+        context = drift["context"]
+        plan = drift["plan"]
+        if not context["summary_found"]:
+            hint("Sin capture summary: el auto-rewrite de host se activa después de un capture o restore.")
+            return
+        if plan and plan.changed_files:
+            warn(f"Host drift detectado: {plan.changed_files} archivos siguen apuntando al host anterior.")
+            hint("`omni migrate` los corregirá automáticamente o puedes ejecutar `omni rewrite-ip --apply`.")
+            return
+        if context["replacements"]:
+            info("La identidad del host cambió, pero no encontré archivos allowlisted que necesiten rewrite.")
+            return
+        if not compact:
+            ok("La identidad del host ya está alineada con el último capture summary.")
 
     def capture_host_cmd(
         self,
@@ -1682,23 +1862,23 @@ class OmniCore:
         if not self.confirm_step("Create state bundle now?", accept_all=accept_all):
             warn("Capture cancelled before state bundle creation.")
             return
-        state_bundle = create_state_bundle(bundle_dir, manifest)
-        ok(f"State bundle created: {state_bundle}")
-
         if not self.confirm_step("Create secrets bundle now?", accept_all=accept_all):
             warn("Capture stopped before secrets bundle creation.")
             return
-        secrets_bundle = create_secrets_bundle(bundle_dir, manifest, passphrase=passphrase)
-        ok(f"Secrets bundle created: {secrets_bundle}")
-
-        summary_path = write_capture_summary(
-            bundle_dir=bundle_dir,
-            manifest_path=selected_path,
-            state_bundle=state_bundle,
-            secrets_bundle=secrets_bundle,
+        pack = self.create_recovery_pack(
+            manifest_path=str(selected_path),
+            home_root=home_root,
+            output=str(bundle_dir),
+            passphrase_env=passphrase_env,
+            profile=profile or str(manifest.get("profile", "")),
         )
+        state_bundle = pack["state_bundle"]
+        secrets_bundle = pack["secrets_bundle"]
+        summary_path = pack["summary_path"]
+        ok(f"State bundle created: {state_bundle}")
+        ok(f"Secrets bundle created: {secrets_bundle}")
         ok(f"Capture summary written: {summary_path}")
-        if not passphrase:
+        if not pack["encrypted"]:
             warn("No passphrase configured. Secrets bundle was exported without encryption.")
 
         summary = summarize_bundle_pair(bundle_dir=bundle_dir, state_bundle=str(state_bundle), secrets_bundle=str(secrets_bundle))
@@ -1738,6 +1918,8 @@ class OmniCore:
         on_calendar: str = "daily",
         profile: str = "",
         show_summary: bool = True,
+        auto_backup: bool = True,
+        before_services=None,
     ):
         print_logo(compact=True)
         section("Restore Host")
@@ -1764,12 +1946,21 @@ class OmniCore:
             passphrase=passphrase,
             target_root=target_root,
             repos=self.repo_entries,
+            before_services=before_services,
         )
         ok(f"Restore completed using {selected_path}")
         timer_installed = False
         if install_timer and self.confirm_step("Install daily Omni timer?", accept_all=accept_all):
             self.install_timer_cmd("omni-update", on_calendar)
             timer_installed = True
+        if auto_backup and AUTO_BACKUP_ON_CHANGE:
+            info("Creando backup automático post-restore...")
+            self.run_backup(
+                manifest_path=str(selected_path),
+                home_root=home_root,
+                passphrase_env=passphrase_env,
+                profile=profile or str(manifest.get("profile", "")),
+            )
 
         if show_summary and self.is_interactive():
             step_map = {step.get("name"): step for step in report.get("steps", []) if isinstance(step, dict)}
@@ -1798,8 +1989,9 @@ class OmniCore:
     def detect_ip_cmd(self):
         print_logo(compact=True)
         section("Host Identity")
+        drift = self.build_host_drift_report(root=str(Path.home()))
         identity = detect_host_identity()
-        capture_summary = load_capture_summary(self.bundle_dir)
+        capture_summary = drift["context"]["summary"]
 
         kv("Public IP", identity.public_ip or "unknown", color=C.GRN if identity.public_ip else C.YLW)
         kv("Private IP", identity.private_ip or "unknown", color=C.GRN if identity.private_ip else C.YLW)
@@ -1808,6 +2000,9 @@ class OmniCore:
         kv("Source", identity.source, color=C.G3)
         if identity.ip_candidates:
             kv("Candidates", ", ".join(identity.ip_candidates), color=C.G3)
+        if drift["context"]["summary_found"]:
+            kv("Drift Files", str(drift["changed_files"]), color=C.YLW if drift["changed_files"] else C.GRN)
+            kv("Replacements", str(drift["total_replacements"]), color=C.YLW if drift["total_replacements"] else C.GRN)
         nl()
 
         if capture_summary and capture_summary.get("source_identity"):
@@ -1817,6 +2012,8 @@ class OmniCore:
             dim(f"private_ip={source.get('private_ip') or 'unknown'}")
             dim(f"hostname={source.get('hostname') or 'unknown'}")
             dim(f"fqdn={source.get('fqdn') or 'unknown'}")
+            nl()
+            self.render_host_drift_summary(drift)
         else:
             warn("No capture summary found. Capture a bundle set to persist old host identity.")
 
@@ -1833,36 +2030,21 @@ class OmniCore:
     ):
         print_logo(compact=True)
         section("Rewrite Host References")
-        target_scan_root = Path(root).expanduser() if root else Path.home()
-        identity = detect_host_identity()
-        summary = load_capture_summary(self.bundle_dir)
-        replacements: Dict[str, str] = {}
+        drift = self.build_host_drift_report(
+            root=root or str(Path.home()),
+            target_public_ip=target_public_ip,
+            target_private_ip=target_private_ip,
+            target_hostname=target_hostname,
+        )
+        plan = drift["plan"]
+        context = drift["context"]
 
-        source_identity = (summary or {}).get("source_identity") or {}
-        source_public = str(source_identity.get("public_ip") or os.environ.get("OMNI_SOURCE_PUBLIC_IP") or "").strip()
-        source_private = str(source_identity.get("private_ip") or os.environ.get("OMNI_SOURCE_PRIVATE_IP") or "").strip()
-        source_hostname = str(source_identity.get("hostname") or os.environ.get("OMNI_SOURCE_HOSTNAME") or "").strip()
-        source_fqdn = str(source_identity.get("fqdn") or os.environ.get("OMNI_SOURCE_FQDN") or "").strip()
-
-        new_public = target_public_ip or identity.public_ip or ""
-        new_private = target_private_ip or identity.private_ip or ""
-        new_hostname = target_hostname or identity.hostname or ""
-        new_fqdn = target_hostname or identity.fqdn or ""
-
-        if source_public and new_public and source_public != new_public:
-            replacements[source_public] = new_public
-        if source_private and new_private and source_private != new_private:
-            replacements[source_private] = new_private
-        if source_hostname and new_hostname and source_hostname != new_hostname:
-            replacements[source_hostname] = new_hostname
-        if source_fqdn and new_fqdn and source_fqdn != new_fqdn:
-            replacements[source_fqdn] = new_fqdn
-
-        if not replacements:
-            warn("No replacement candidates found. Capture summary may be missing or already aligned with this host.")
+        if not context["summary_found"]:
+            warn("No capture summary found. Restore or capture first so Omni knows the old host identity.")
             return
-
-        plan = build_rewrite_plan(target_scan_root, replacements)
+        if not context["replacements"]:
+            warn("No replacement candidates found. The old host identity already matches this host.")
+            return
         print(preview_rewrite_plan(plan, context_lines=context_lines))
         if plan.changed_files == 0:
             warn("No matching references found in allowlisted files.")
@@ -1871,6 +2053,9 @@ class OmniCore:
         if apply_changes or self.confirm_step("Apply these replacements now?", accept_all=accept_all):
             result = apply_rewrite_plan(plan)
             ok(f"Updated {len(result.applied)} files")
+            if result.applied and AUTO_BACKUP_ON_CHANGE:
+                info("Creando backup automático post-rewrite...")
+                self.run_backup()
         else:
             warn("Preview only. Re-run with --apply or confirm interactively.")
 
@@ -1895,7 +2080,34 @@ class OmniCore:
         kv("Detected Platform", f"{info_obj.system} / {info_obj.shell} / {info_obj.package_manager}", color=C.GRN)
         nl()
 
-        rewrite_applied = False
+        rewrite_status = "disabled"
+        rewrite_files = 0
+
+        def before_services_hook(_report: Dict[str, Any]) -> Dict[str, Any]:
+            nonlocal rewrite_status, rewrite_files
+            if not apply_rewrite:
+                rewrite_status = "disabled"
+                return {"status": rewrite_status}
+            drift = self.build_host_drift_report(root=home_root or str(Path.home()))
+            context = drift["context"]
+            plan = drift["plan"]
+            if not context["summary_found"]:
+                rewrite_status = "missing-capture-summary"
+                return {"status": rewrite_status}
+            if not context["replacements"]:
+                rewrite_status = "aligned"
+                return {"status": rewrite_status}
+            if not plan or plan.changed_files == 0:
+                rewrite_status = "no-matches"
+                return {"status": rewrite_status}
+            result = apply_rewrite_plan(plan)
+            rewrite_files = len(result.applied)
+            rewrite_status = "applied" if rewrite_files else "no-matches"
+            return {
+                "status": rewrite_status,
+                "files": rewrite_files,
+                "replacements": drift["total_replacements"],
+            }
 
         self.restore_host_cmd(
             manifest_path=manifest_path,
@@ -1909,23 +2121,30 @@ class OmniCore:
             on_calendar=on_calendar,
             profile=profile,
             show_summary=False,
+            auto_backup=False,
+            before_services=before_services_hook,
         )
-
-        if apply_rewrite and self.confirm_step("Detect and rewrite old host references to this host?", accept_all=accept_all):
-            self.rewrite_ip_cmd(root=home_root or str(Path.home()), apply_changes=True, accept_all=True)
-            rewrite_applied = True
+        if AUTO_BACKUP_ON_CHANGE:
+            info("Creando backup automático post-migrate...")
+            self.run_backup(
+                manifest_path=manifest_path,
+                home_root=home_root,
+                passphrase_env=passphrase_env,
+                profile=profile,
+            )
 
         if self.is_interactive():
             lines = [
                 f"Plataforma detectada: {info_obj.system} / {info_obj.shell}",
-                f"Reescritura de referencias: {'aplicada' if rewrite_applied else 'no aplicada'}",
+                f"Reescritura de referencias: {rewrite_status}",
+                f"Archivos corregidos: {rewrite_files}",
                 "",
                 "Validación inmediata:",
                 "$ omni status",
                 "$ omni inventory",
                 "$ omni detect-ip",
             ]
-            if not rewrite_applied:
+            if rewrite_status not in {"applied", "aligned"}:
                 lines.append("$ omni rewrite-ip --apply")
             render_action_summary("Migración finalizada", lines, accent=C.GRN)
 
@@ -2429,6 +2648,7 @@ def main():
     parser.add_argument("--target-hostname", type=str, default="", help="Target hostname/FQDN for rewrite/migrate")
     parser.add_argument("--context-lines", type=int, default=2, help="Context lines for rewrite previews")
     parser.add_argument("--apply", action="store_true", help="Apply changes for rewrite-style commands")
+    parser.add_argument("--skip-rewrite", action="store_true", help="Skip automatic host reference rewrite during migrate")
     parser.add_argument("--dest", type=str, default="", help="Remote destination for bridge send")
 
     args, remaining = parser.parse_known_args()
@@ -2466,7 +2686,13 @@ def main():
         elif action == "restart":
             core.restart_services()
         elif action == "backup":
-            core.run_backup()
+            core.run_backup(
+                target=args.output or None,
+                manifest_path=args.manifest,
+                home_root=args.home_root,
+                passphrase_env=args.passphrase_env,
+                profile=args.profile,
+            )
         elif action in ["transfer", "tr"]:
             if len(remaining) >= 2:
                 core.run_transfer(remaining[0], remaining[1], {"protocol": args.protocol, "compress": args.compress})
@@ -2517,7 +2743,7 @@ def main():
                 accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
                 install_timer=args.yes or args.accept_all,
                 on_calendar=args.on_calendar,
-                apply_rewrite=args.apply or args.yes or args.accept_all,
+                apply_rewrite=not args.skip_rewrite,
                 profile=args.profile,
             )
         elif action == "detect-ip":

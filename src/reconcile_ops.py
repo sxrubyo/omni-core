@@ -6,7 +6,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from bundle_ops import restore_bundle
 from host_inventory import expand_path
@@ -241,6 +241,7 @@ def reconcile_host(
     passphrase: str = "",
     target_root: str = "/",
     repos: List[Any] | None = None,
+    before_services: Callable[[Dict[str, Any]], Dict[str, Any] | None] | None = None,
 ) -> Dict[str, Any]:
     report: Dict[str, Any] = {"steps": []}
 
@@ -263,6 +264,10 @@ def reconcile_host(
 
     install_res = install_project_dependencies(list(manifest.get("install_targets", [])))
     report["steps"].append({"name": "install_targets", "results": install_res})
+
+    if before_services:
+        hook_res = before_services(report) or {}
+        report["steps"].append({"name": "before_services", **hook_res})
 
     compose_res = start_compose_projects(list(manifest.get("compose_projects", [])))
     report["steps"].append({"name": "compose", "results": compose_res})

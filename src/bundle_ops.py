@@ -300,7 +300,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def bundle_metadata(bundle_path: Path) -> Dict[str, Any]:
+def bundle_metadata(bundle_path: Path, *, include_hash: bool = False, inspect_archive: bool = False) -> Dict[str, Any]:
     path = Path(bundle_path)
     if not path.exists():
         raise FileNotFoundError(str(path))
@@ -309,12 +309,15 @@ def bundle_metadata(bundle_path: Path) -> Dict[str, Any]:
         "path": str(path),
         "exists": True,
         "size_bytes": path.stat().st_size,
-        "sha256": sha256_file(path),
+        "sha256": sha256_file(path) if include_hash else None,
         "encrypted": path.suffix == ".enc",
-        "archive_kind": "unknown",
+        "archive_kind": "state" if path.name.startswith("state_bundle_") else "secrets" if path.name.startswith("secrets_bundle_") else "unknown",
         "manifest_profile": None,
         "created_at": None,
     }
+
+    if not inspect_archive:
+        return metadata
 
     inspect_path = path
     temp_plain: Optional[tempfile.TemporaryDirectory[str]] = None

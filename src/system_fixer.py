@@ -3,7 +3,11 @@ import subprocess
 import os
 import json
 import logging
+import shutil
 from typing import Dict, List, Tuple
+from pathlib import Path
+
+from platform_ops import detect_platform_info
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("omni.system")
@@ -12,19 +16,30 @@ class SystemFixer:
     """
     Handles system-level maintenance and fixes for Ubuntu.
     """
-    
-    def run_cmd(self, cmd: str, shell=True) -> Tuple[int, str, str]:
+
+    def __init__(self):
+        self.platform_info = detect_platform_info()
+
+    def run_cmd(self, cmd: str, shell=True, timeout: int = 15) -> Tuple[int, str, str]:
         """Runs a shell command and returns (returncode, stdout, stderr)."""
         try:
             proc = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = proc.communicate()
+            stdout, stderr = proc.communicate(timeout=timeout)
             return proc.returncode, stdout.strip(), stderr.strip()
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            return -1, stdout.strip(), (stderr.strip() or f"Command timed out after {timeout}s")
         except Exception as e:
             logger.error(f"Error running command '{cmd}': {e}")
             return -1, "", str(e)
 
     def check_disk_space(self, threshold_percent=90) -> Dict:
         """Checks disk usage and cleans up if critical."""
+        if self.platform_info.system == "windows":
+            usage = shutil.disk_usage(Path.home().anchor or str(Path.home()))
+            use_percent = int((usage.used / usage.total) * 100) if usage.total else 0
+            return {"status": "skipped", "usage_percent": use_percent, "free": usage.free, "message": "Linux-only disk check skipped on Windows local shell."}
         code, out, err = self.run_cmd("df -h /")
         if code != 0:
             return {"status": "error", "message": f"Failed to check disk: {err}"}
@@ -66,6 +81,8 @@ class SystemFixer:
 
     def check_memory(self) -> Dict:
         """Checks memory usage."""
+        if self.platform_info.system == "windows":
+            return {"status": "skipped", "message": "Linux-only memory check skipped on Windows local shell."}
         code, out, _ = self.run_cmd("free -m")
         if code != 0:
             return {"status": "error"}
@@ -91,6 +108,8 @@ class SystemFixer:
 
     def check_and_fix_pm2(self) -> Dict:
         """Checks PM2 processes and restarts any that are stopped/errored."""
+        if self.platform_info.system == "windows":
+            return {"status": "skipped", "message": "PM2 check skipped on Windows local shell."}
         code, out, err = self.run_cmd("pm2 jlist")
         if code != 0:
             return {"status": "error", "message": "PM2 not found or error"}

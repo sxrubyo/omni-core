@@ -118,6 +118,21 @@ La forma correcta sigue siendo:
 4. mover `state bundle` + `secrets bundle`
 5. restaurar con `omni restore` o `omni migrate`
 
+### Automatización de host y backups
+
+Omni ya está orientado a que no tengas que ir persiguiendo IPs o snapshots a mano:
+
+- `omni start` y `omni doctor` diagnostican si el host actual sigue teniendo referencias al host viejo
+- `omni detect-ip` muestra la identidad actual y cuántos archivos siguen con drift
+- `omni migrate` reescribe referencias del host automáticamente por defecto
+- si quieres impedirlo, usas `omni migrate --skip-rewrite`
+- `omni rewrite-ip --apply` sigue existiendo como comando directo
+
+Además:
+
+- `omni init`, `omni restore`, `omni migrate` y `omni rewrite-ip --apply` crean backup automático en `backups/auto-bundles`
+- el timer diario `omni-update.timer` ahora ejecuta primero `omni backup`, luego `omni fix` y `omni sync`
+
 ## Modos de instalación
 
 ### 0. Guía simple desde GitHub

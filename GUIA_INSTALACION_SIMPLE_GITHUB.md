@@ -44,6 +44,20 @@ Pero eso solo te facilita bajar `omni-core`. No reemplaza:
 
 O sea: GitHub público ayuda con el código del instalador. La migración real sigue necesitando `omni capture` y luego `omni restore` o `omni migrate`.
 
+## Lo automático que ya hace Omni
+
+Si ya existe `capture summary`, Omni puede detectar y corregir mucho más sin pedirte la IP:
+
+- `omni start` y `omni doctor` detectan drift del host
+- `omni detect-ip` te dice si siguen quedando referencias al host viejo
+- `omni migrate` reescribe esas referencias automáticamente
+- `omni rewrite-ip --apply` sigue existiendo como comando manual
+
+Y además:
+
+- `omni init`, `omni restore`, `omni migrate` y `omni rewrite-ip --apply` dejan backup automático en `backups/auto-bundles`
+- el timer diario ejecuta `omni backup`, luego `omni fix` y `omni sync`
+
 Tu caso correcto es este:
 
 1. abres PowerShell en tu PC

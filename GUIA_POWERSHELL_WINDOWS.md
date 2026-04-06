@@ -26,6 +26,16 @@ Pero no reemplaza una migración real. GitHub público solo te ayuda con el cód
 - `secrets bundle`
 - restore/migrate
 
+## Qué ya hace Omni automáticamente
+
+Cuando el host ya tiene `capture summary`, Omni puede trabajar mucho más solo:
+
+- `omni start` y `omni doctor` detectan drift de host
+- `omni migrate` corrige referencias del host anterior automáticamente
+- `omni rewrite-ip --apply` sigue disponible si quieres forzarlo a mano
+- `omni init`, `omni restore`, `omni migrate` y `omni rewrite-ip --apply` dejan backup automático en `backups/auto-bundles`
+- el timer diario también corre backup antes de `fix` y `sync`
+
 Si no quieres entrar en claves, `pem` o SSH remoto desde PowerShell, usa mejor esta guía:
 
 - [GUIA_INSTALACION_SIMPLE_GITHUB.md](/home/ubuntu/omni-core/GUIA_INSTALACION_SIMPLE_GITHUB.md)

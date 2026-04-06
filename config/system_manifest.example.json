@@ -8,8 +8,8 @@
   ],
   "state_exclude_paths": [
     "~/omni-core/backups/host-bundles",
+    "~/omni-core/backups/auto-bundles",
     "~/omni-core/logs",
-    "~/melissa-backups",
     "~/backups-test",
     "~/data-test",
     "~/logs-test"
