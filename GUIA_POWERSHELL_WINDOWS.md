@@ -9,6 +9,7 @@ La experiencia nueva recomendada es:
 3. tú usas `omni` o `omni start`
 4. eliges `bridge`, `capture`, `restore`, `migrate`, `doctor` o `agent`
 5. si quieres llevarte todo `/home/ubuntu`, activas `omni init --profile full-home`
+6. cuando configuras la IA, hablas con ella por `omni chat`
 
 ## Qué entra cuando usas `full-home`
 
@@ -38,9 +39,11 @@ Cuando el host ya tiene `capture summary`, Omni puede trabajar mucho más solo:
 - `omni timer-install` deja también `omni-watch.service` para vigilar cambios del scope
 - `omni agent` abre el selector visual de proveedor para Claude, OpenAI, Azure OpenAI, Gemini, Bedrock, OpenRouter, xAI, Groq, Qwen, DeepSeek, Mistral, Cohere, Together, Perplexity o endpoint compatible
 - `omni agent list` imprime el catálogo completo de providers/modelos desde el host remoto
+- `omni chat` abre el chat operativo usando el provider principal configurado en `omni agent`
 - `omni examples` imprime playbooks listos para copiar desde el host
 - `omni auto --p` imprime el one-liner de PowerShell para auto-actualizar el host remoto
 - `omni agent` ya permite pegar API keys y otros valores de forma más robusta en terminales PowerShell/SSH
+- `config/omni_agent_activation.txt` guarda la identidad persistente del chat y viaja con `full-home`
 
 Si no quieres entrar en claves, `pem` o SSH remoto desde PowerShell, usa mejor esta guía:
 
@@ -189,6 +192,8 @@ Desde tu PowerShell:
 
 ```powershell
 ssh ubuntu@IP_DEL_SERVIDOR "cd /opt/omni-core && omni"
+ssh ubuntu@IP_DEL_SERVIDOR "cd /opt/omni-core && omni agent"
+ssh ubuntu@IP_DEL_SERVIDOR "cd /opt/omni-core && omni chat"
 ssh ubuntu@IP_DEL_SERVIDOR "cd /opt/omni-core && omni doctor"
 ssh ubuntu@IP_DEL_SERVIDOR "cd /opt/omni-core && omni inventory"
 ssh ubuntu@IP_DEL_SERVIDOR "cd /opt/omni-core && docker compose ps"

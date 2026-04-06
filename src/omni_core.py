@@ -28,6 +28,17 @@ from bundle_ops import (
     restore_bundle,
 )
 from agent_ops import env_has_value, get_provider, load_agent_config, provider_catalog, save_agent_config, upsert_env_value
+from chat_ops import (
+    chat_completion,
+    clean_assistant_output,
+    ensure_activation_prompt,
+    latest_chat_session_path,
+    load_chat_session,
+    load_env_value,
+    new_chat_session,
+    parse_action_block,
+    save_chat_session,
+)
 from bridge_ops import (
     build_host_rewrite_context,
     load_capture_summary,
@@ -74,6 +85,10 @@ LOG_DIR = Path(os.environ.get("OMNI_LOG_DIR", OMNI_HOME / "logs")).resolve()
 WATCH_STATE_FILE = Path(os.environ.get("OMNI_WATCH_STATE_FILE", STATE_DIR / "watch_snapshot.json")).resolve()
 ENV_FILE = Path(os.environ.get("OMNI_ENV_FILE", OMNI_HOME / ".env")).resolve()
 AGENT_CONFIG_FILE = Path(os.environ.get("OMNI_AGENT_CONFIG_FILE", CONFIG_DIR / "omni_agent.json")).resolve()
+AGENT_ACTIVATION_FILE = Path(
+    os.environ.get("OMNI_AGENT_ACTIVATION_FILE", CONFIG_DIR / "omni_agent_activation.txt")
+).resolve()
+AGENT_CHAT_DIR = Path(os.environ.get("OMNI_CHAT_DIR", STATE_DIR / "agent-chat")).resolve()
 TASKS_FILE = Path(os.environ.get("OMNI_TASKS_FILE", OMNI_HOME / "tasks.json")).resolve()
 REPOS_FILE = Path(os.environ.get("OMNI_REPOS_FILE", CONFIG_DIR / "repos.json")).resolve()
 SERVERS_FILE = Path(os.environ.get("OMNI_SERVERS_FILE", CONFIG_DIR / "servers.json")).resolve()
@@ -239,6 +254,7 @@ ALIASES = {
     "ex": "examples",
     "pb": "examples",
     "a": "auto",
+    "cmd": "commands",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1043,7 +1059,7 @@ class OmniCore:
         self.load_tasks()
 
     def ensure_runtime_dirs(self):
-        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, AUTO_BUNDLE_DIR, LOG_DIR):
+        for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, AUTO_BUNDLE_DIR, LOG_DIR, AGENT_CHAT_DIR):
             path.mkdir(parents=True, exist_ok=True)
 
     def load_repo_entries(self) -> List[Any]:
@@ -1622,10 +1638,12 @@ class OmniCore:
         kv("Base URL", str(config.get("base_url", "unknown")), color=C.GRN)
         kv("Env Var", env_var or "none", color=C.GRN)
         kv("Secret", "loaded" if env_var and env_has_value(ENV_FILE, env_var) else "missing", color=C.GRN if env_var and env_has_value(ENV_FILE, env_var) else C.YLW)
+        kv("Activation", str(AGENT_ACTIVATION_FILE), color=C.GRN)
         if config.get("docs_url"):
             kv("Docs", str(config.get("docs_url")), color=C.GRN)
         if config.get("notes"):
             dim(str(config.get("notes")))
+        dim("  Usa `omni chat` para abrir la interfaz conversacional.")
         nl()
 
     def show_agent_catalog(self):
@@ -1643,6 +1661,327 @@ class OmniCore:
             if provider.notes:
                 dim(f"  note: {provider.notes}")
             nl()
+
+    def show_chat_status(self):
+        print_logo(compact=True)
+        section("Omni Chat")
+        config = load_agent_config(AGENT_CONFIG_FILE)
+        if not config:
+            warn("Omni Chat necesita primero una configuración de `omni agent`.")
+            hint("Usa `omni agent` para elegir proveedor y modelo.")
+            return
+
+        provider = get_provider(str(config.get("provider", "")))
+        title = provider.title if provider else str(config.get("provider_title", config.get("provider", "unknown")))
+        env_var = str(config.get("env_var", ""))
+        latest_session = latest_chat_session_path(AGENT_CHAT_DIR)
+        kv("Provider", title, color=C.GRN)
+        kv("Model", str(config.get("model", "unknown")), color=C.GRN)
+        kv("Base URL", str(config.get("base_url", "unknown")), color=C.GRN)
+        kv("Secret", "loaded" if env_var and load_env_value(ENV_FILE, env_var) else "missing", color=C.GRN if env_var and load_env_value(ENV_FILE, env_var) else C.YLW)
+        kv("Activation", str(AGENT_ACTIVATION_FILE), color=C.GRN)
+        kv("Latest Session", latest_session.name if latest_session else "none", color=C.GRN if latest_session else C.YLW)
+        if AGENT_ACTIVATION_FILE.exists():
+            activation_preview = ensure_activation_prompt(AGENT_ACTIVATION_FILE).splitlines()[0]
+            dim(f"  activation: {activation_preview}")
+        nl()
+
+    def render_chat_command_help(self):
+        box(
+            "Omni Chat Commands",
+            [
+                "/help  ver comandos del chat",
+                "/status  ver provider, modelo y sesión activa",
+                "/new  abrir una sesión limpia",
+                "/clear  limpiar el historial de la sesión actual",
+                "/save  guardar sesión en disco",
+                "/run  ejecutar el último comando sugerido por Omni",
+                "/todo  ver la última lista de tareas sugerida",
+                "/exec on|off  activar o desactivar ejecución rápida de comandos",
+                "/quit  salir del chat",
+            ],
+            width=min(92, TERM_WIDTH - 4),
+            accent=C.CYN,
+        )
+
+    def resolve_chat_runtime(self) -> Dict[str, str]:
+        config = load_agent_config(AGENT_CONFIG_FILE)
+        if not config:
+            raise RuntimeError("Omni Agent no está configurado todavía.")
+
+        env_var = str(config.get("env_var", "")).strip()
+        api_key = load_env_value(ENV_FILE, env_var) if env_var else ""
+        if not api_key:
+            raise RuntimeError(f"Falta la API key en {env_var or 'la variable configurada'}")
+
+        activation_prompt = ensure_activation_prompt(AGENT_ACTIVATION_FILE)
+        workspace_lines = [
+            f"Workspace principal: {Path.home()}",
+            f"OMNI_HOME: {OMNI_HOME}",
+            f"Activation file: {AGENT_ACTIVATION_FILE}",
+        ]
+        codex_dir = Path.home() / ".codex"
+        if codex_dir.exists():
+            workspace_lines.append(f"Codex workspace disponible en {codex_dir}. Úsalo como contexto, no como proveedor principal.")
+        system_prompt = activation_prompt.strip() + "\n\nContexto del workspace:\n- " + "\n- ".join(workspace_lines)
+        return {
+            "provider": str(config.get("provider", "")),
+            "provider_title": str(config.get("provider_title", config.get("provider", "unknown"))),
+            "protocol": str(config.get("protocol", "openai-compatible")),
+            "env_var": env_var,
+            "base_url": str(config.get("base_url", "")),
+            "model": str(config.get("model", "")),
+            "api_key": api_key,
+            "system_prompt": system_prompt,
+        }
+
+    def open_chat_session(self, runtime: Dict[str, str], *, force_new: bool = False) -> Dict[str, Any]:
+        latest_path = None if force_new else latest_chat_session_path(AGENT_CHAT_DIR)
+        if latest_path and latest_path.exists():
+            try:
+                session = load_chat_session(latest_path)
+                session.setdefault("messages", [])
+                return session
+            except Exception:
+                pass
+        session = new_chat_session(
+            AGENT_CHAT_DIR,
+            provider_title=runtime["provider_title"],
+            model=runtime["model"],
+            base_url=runtime["base_url"],
+            provider_key=runtime["provider"],
+            protocol=runtime["protocol"],
+            activation_file=str(AGENT_ACTIVATION_FILE),
+        )
+        save_chat_session(Path(session["path"]), session)
+        return session
+
+    def render_assistant_message(self, text: str, *, title: str = "Omni") -> None:
+        lines = [segment.strip() for segment in text.splitlines() if segment.strip()]
+        box(title, lines or ["(sin contenido)"], width=min(94, TERM_WIDTH - 4), accent=C.GLD_BRIGHT)
+
+    def render_action_hint(self, action: Dict[str, Any]) -> None:
+        if action.get("type") == "command":
+            render_action_summary(
+                action.get("title", "Comando sugerido"),
+                [
+                    f"Comando: {action.get('command', '')}",
+                    "Usa `/run` para ejecutarlo desde el chat.",
+                ],
+                accent=C.CYN,
+            )
+            return
+        if action.get("type") == "todo":
+            items = action.get("items") or []
+            lines = [action.get("title", "Tareas sugeridas")] + [f"- {item}" for item in items if item]
+            box("Plan sugerido", lines, width=min(94, TERM_WIDTH - 4), accent=C.CYN)
+
+    def run_chat_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        if action.get("type") != "command":
+            raise RuntimeError("La última acción no es un comando ejecutable.")
+        command = str(action.get("command", "")).strip()
+        if not command:
+            raise RuntimeError("La última acción no contiene comando.")
+        completed = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(Path.home()),
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
+        lines: List[str] = [f"exit_code={completed.returncode}"]
+        if stdout:
+            lines.append("stdout:")
+            lines.extend(stdout.splitlines()[-10:])
+        if stderr:
+            lines.append("stderr:")
+            lines.extend(stderr.splitlines()[-10:])
+        render_action_summary("Resultado del comando", lines, accent=C.GRN if completed.returncode == 0 else C.RED)
+        return {
+            "command": command,
+            "exit_code": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
+    def summarize_command_result_for_chat(self, result: Dict[str, Any]) -> str:
+        def _tail(text: str, label: str) -> List[str]:
+            if not text:
+                return []
+            lines = text.splitlines()[-12:]
+            return [f"{label}:"] + lines
+
+        parts = [f"Resultado del comando `{result['command']}`:", f"exit_code={result['exit_code']}"]
+        parts.extend(_tail(result.get("stdout", ""), "stdout"))
+        parts.extend(_tail(result.get("stderr", ""), "stderr"))
+        return "\n".join(parts).strip()
+
+    def chat_once(self, runtime: Dict[str, str], session: Dict[str, Any], prompt: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        session_messages = list(session.get("messages", []))
+        request_messages = [{"role": "system", "content": runtime["system_prompt"]}] + session_messages + [{"role": "user", "content": prompt}]
+        result = chat_completion(
+            protocol=runtime["protocol"],
+            base_url=runtime["base_url"],
+            model=runtime["model"],
+            api_key=runtime["api_key"],
+            messages=request_messages,
+        )
+        raw_text = result.get("text", "").strip()
+        action = parse_action_block(raw_text)
+        clean_text = clean_assistant_output(raw_text) or "No tuve texto útil para devolverte."
+        session_messages.append({"role": "user", "content": prompt})
+        session_messages.append({"role": "assistant", "content": clean_text})
+        session["messages"] = session_messages
+        save_chat_session(Path(session["path"]), session)
+        return clean_text, action
+
+    def chat_cmd(self, subaction: str = "", *, accept_all: bool = False, prompt: str = ""):
+        normalized = str(subaction or "").strip().lower()
+        if normalized in {"status", "show"}:
+            self.show_chat_status()
+            return
+
+        try:
+            runtime = self.resolve_chat_runtime()
+        except RuntimeError as err:
+            print_logo(compact=True)
+            section("Omni Chat")
+            fail(str(err))
+            hint("Usa `omni agent` para configurar proveedor/modelo y guardar la API key.")
+            return
+
+        if prompt.strip():
+            session = self.open_chat_session(runtime)
+            response, action = self.chat_once(runtime, session, prompt.strip())
+            print_logo(compact=True)
+            section("Omni Chat")
+            kv("Provider", runtime["provider_title"], color=C.GRN)
+            kv("Model", runtime["model"], color=C.GRN)
+            nl()
+            self.render_assistant_message(response)
+            if action:
+                self.render_action_hint(action)
+            return
+
+        if accept_all or not self.is_interactive():
+            print_logo(compact=True)
+            section("Omni Chat")
+            warn("Necesitas un terminal interactivo para abrir la interfaz conversacional.")
+            hint("También puedes usar `omni chat \"tu mensaje\"` para una consulta puntual.")
+            return
+
+        print_logo(compact=True)
+        section("Omni Chat")
+        kv("Provider", runtime["provider_title"], color=C.GRN)
+        kv("Model", runtime["model"], color=C.GRN)
+        kv("Base URL", runtime["base_url"], color=C.GRN)
+        kv("Activation", str(AGENT_ACTIVATION_FILE), color=C.GRN)
+        dim("Chat conversacional normal. Slash commands disponibles con /help.")
+        nl()
+
+        session = self.open_chat_session(runtime, force_new=normalized in {"new", "fresh"})
+        if session.get("messages"):
+            info(f"Sesión recuperada: {Path(session['path']).name}")
+            dim(f"Mensajes guardados: {len(session['messages'])}")
+        else:
+            info(f"Sesión nueva: {Path(session['path']).name}")
+
+        exec_enabled = accept_all
+        last_action: Optional[Dict[str, Any]] = None
+
+        while True:
+            try:
+                print()
+                user_input = input(q(C.PRIMARY, "  you > ")).strip()
+            except EOFError:
+                print()
+                break
+            except KeyboardInterrupt:
+                print()
+                break
+
+            if not user_input:
+                continue
+
+            if user_input.startswith("/"):
+                command = user_input[1:].strip()
+                lowered = command.lower()
+                if lowered in {"quit", "exit"}:
+                    save_chat_session(Path(session["path"]), session)
+                    ok("Sesión guardada.")
+                    break
+                if lowered == "help":
+                    self.render_chat_command_help()
+                    continue
+                if lowered == "status":
+                    self.show_chat_status()
+                    continue
+                if lowered == "new":
+                    session = self.open_chat_session(runtime, force_new=True)
+                    last_action = None
+                    info(f"Sesión nueva: {Path(session['path']).name}")
+                    continue
+                if lowered == "clear":
+                    session["messages"] = []
+                    save_chat_session(Path(session["path"]), session)
+                    last_action = None
+                    ok("Historial limpiado para esta sesión.")
+                    continue
+                if lowered == "save":
+                    save_chat_session(Path(session["path"]), session)
+                    ok(f"Sesión guardada en {session['path']}")
+                    continue
+                if lowered.startswith("exec "):
+                    toggle = lowered.split(" ", 1)[1].strip()
+                    exec_enabled = toggle in {"on", "true", "1", "yes", "si"}
+                    ok(f"Ejecución rápida {'activada' if exec_enabled else 'desactivada'}.")
+                    continue
+                if lowered == "run":
+                    if not last_action:
+                        warn("No hay comando sugerido listo para ejecutar.")
+                        continue
+                    try:
+                        result = self.run_chat_action(last_action)
+                    except Exception as err:
+                        fail(str(err))
+                        continue
+                    session["messages"].append(
+                        {
+                            "role": "user",
+                            "content": self.summarize_command_result_for_chat(result),
+                        }
+                    )
+                    save_chat_session(Path(session["path"]), session)
+                    continue
+                if lowered == "todo":
+                    if not last_action or last_action.get("type") != "todo":
+                        warn("No hay lista de tareas sugerida en memoria.")
+                        continue
+                    self.render_action_hint(last_action)
+                    continue
+                warn(f"Comando desconocido: /{command}")
+                continue
+
+            with Spinner("Pensando...", color=C.PRIMARY):
+                try:
+                    response, action = self.chat_once(runtime, session, user_input)
+                except Exception as err:
+                    print()
+                    fail(f"Omni Chat falló: {err}")
+                    continue
+
+            self.render_assistant_message(response)
+            last_action = action
+            if action:
+                self.render_action_hint(action)
+                if exec_enabled and action.get("type") == "command" and not action.get("confirm", True):
+                    try:
+                        self.run_chat_action(action)
+                    except Exception as err:
+                        fail(str(err))
 
     def show_examples(self):
         print_logo(tagline=True)
@@ -1841,6 +2180,7 @@ class OmniCore:
                 f"Base URL: {base_url}",
                 f"Secret: {'guardado en .env' if wrote_secret else ('ya presente' if env_has_value(ENV_FILE, env_var) else 'pendiente')}",
                 f"Docs: {provider.docs_url}",
+                "Chat: omni chat",
             ],
             accent=C.PRIMARY,
         )
@@ -1858,8 +2198,10 @@ class OmniCore:
         dim("Luego saca `backups/host-bundles` fuera del host actual.")
         bullet("Configurar Omni Agent  -> omni agent", C.GRN)
         dim("Selector visual para Claude, OpenAI, Azure OpenAI, Gemini, Bedrock, OpenRouter, xAI, Groq, Qwen, DeepSeek, Mistral, Cohere, Together, Perplexity o endpoint compatible.")
+        bullet("Hablar con Omni Agent  -> omni chat", C.GRN)
+        dim("Interfaz conversacional con historial, slash commands y acciones sugeridas.")
         bullet("Ver playbooks listos  -> omni examples", C.GRN)
-        dim("Comandos listos para captura, migración, bridge, rewrite y agent.")
+        dim("Comandos listos para captura, migración, bridge, rewrite, agent y chat.")
         bullet("One-liner PowerShell  -> omni auto --p", C.GRN)
         dim("Imprime el comando de auto-actualización listo para pegar en PowerShell.")
         nl()
@@ -1877,6 +2219,7 @@ class OmniCore:
         bullet("omni capture   - Build a full recovery pack from the active profile", C.GRN)
         bullet("omni restore   - Restore from latest bundle + secrets", C.GRN)
         bullet("omni migrate   - Rebuild this host end to end", C.GRN)
+        bullet("omni commands  - Show the full Omni command surface", C.GRN)
         nl()
 
         print("  " + q(C.W, "ADVANCED COMMANDS", bold=True))
@@ -1904,6 +2247,8 @@ class OmniCore:
         bullet("omni rewrite-ip - Rewrite old host references safely", C.PRIMARY)
         bullet("omni agent     - Configure Omni Agent provider and model", C.PRIMARY)
         dim("    Use `omni agent list` to inspect the full provider/model catalog")
+        bullet("omni chat      - Open a conversational terminal with Omni Agent", C.PRIMARY)
+        dim("    También soporta `omni chat \"tu mensaje\"` para un turno puntual")
         bullet("omni examples  - Show ready-to-copy operational playbooks", C.PRIMARY)
         bullet("omni auto      - Show automation status or emit PowerShell auto-update command", C.PRIMARY)
         bullet("omni bridge    - Create/send/receive migration packs", C.PRIMARY)
@@ -1963,6 +2308,7 @@ class OmniCore:
             (CONFIG_DIR / "repos.json", CONFIG_DIR / "repos.example.json"),
             (CONFIG_DIR / "servers.json", CONFIG_DIR / "servers.example.json"),
             (CONFIG_DIR / "system_manifest.json", CONFIG_DIR / "system_manifest.example.json"),
+            (AGENT_ACTIVATION_FILE, CONFIG_DIR / "omni_agent_activation.example.txt"),
         ]
 
         created: List[Path] = []
@@ -2087,7 +2433,7 @@ class OmniCore:
         else:
             recommended_idx = next((idx for idx, option in enumerate(flow_options) if option.recommended), 0)
             labels = [option.title for option in flow_options]
-            icons = ["🛫", "📦", "♻️", "🚚", "🩺", "🧠", "⚙️"]
+            icons = ["🛫", "📦", "♻️", "🚚", "🩺", "🧠", "💬", "⚙️"]
             descriptions = []
             for option in flow_options:
                 suffix = " Recomendado en este host." if option.recommended else ""
@@ -2129,6 +2475,9 @@ class OmniCore:
             return
         if chosen_flow == "agent":
             self.agent_cmd(accept_all=effective_accept_all)
+            return
+        if chosen_flow == "chat":
+            self.chat_cmd(accept_all=effective_accept_all)
             return
         self.show_help()
 
@@ -3090,6 +3439,8 @@ def main():
     try:
         if action in ["help", "?"] or args.help:
             core.show_help()
+        elif action == "commands":
+            core.show_help()
         elif action == "start":
             core.start_guided(accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
         elif action == "check":
@@ -3188,6 +3539,14 @@ def main():
         elif action == "agent":
             agent_action = remaining[0] if remaining else ""
             core.agent_cmd(agent_action, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
+        elif action == "chat":
+            chat_action = remaining[0] if remaining and remaining[0].lower() in {"status", "show", "new"} else ""
+            chat_prompt = " ".join(remaining[1:] if chat_action else remaining).strip()
+            core.chat_cmd(
+                chat_action,
+                accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
+                prompt=chat_prompt,
+            )
         elif action in {"examples", "playbook", "playbooks"}:
             core.show_examples()
         elif action == "auto":
@@ -3262,7 +3621,7 @@ def main():
             core.purge_cmd(args.manifest, args.home_root, args.include_secrets, args.yes, profile=args.profile)
         else:
             print(f"Unknown action: {action}")
-            hint("Run 'omni help' for available commands")
+            hint("Run 'omni help' or 'omni commands' for available commands")
     except KeyboardInterrupt:
         print()
         warn("Operación cancelada por el usuario.")

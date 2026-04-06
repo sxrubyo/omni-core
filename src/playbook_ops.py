@@ -67,6 +67,13 @@ def build_examples_catalog() -> List[ExampleEntry]:
             command="omni agent\nomni agent list\nomni agent status",
         ),
         ExampleEntry(
+            key="chat",
+            title="Chat operativo con Omni",
+            description="Abre la interfaz conversacional de Omni Agent con historial, slash commands y acciones sugeridas.",
+            when_to_use="Cuando ya elegiste un provider y quieres hablar normal con Omni para operar el host o pedir comandos.",
+            command="omni chat\nomni chat \"hazme un diagnóstico rápido del host\"",
+        ),
+        ExampleEntry(
             key="bridge-send",
             title="Modo puente",
             description="Prepara bundles y luego los empuja al destino remoto.",

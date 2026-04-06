@@ -25,8 +25,9 @@ class PlaybookOpsTests(unittest.TestCase):
         self.assertIn("full-home-capture", keys)
         self.assertIn("full-home-migrate", keys)
         self.assertIn("agent-setup", keys)
+        self.assertIn("chat", keys)
         self.assertIn("bridge-send", keys)
-        self.assertGreaterEqual(len(entries), 8)
+        self.assertGreaterEqual(len(entries), 9)
 
     def test_powershell_auto_command_uses_placeholders_when_values_missing(self):
         command = build_powershell_auto_command()

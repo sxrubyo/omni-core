@@ -16,6 +16,12 @@ omni start
 
 Eso abre el flujo guiado para elegir entre `bridge`, `capture`, `restore`, `migrate`, `doctor` o `agent`.
 
+Para hablar normal con Omni una vez configurada la IA:
+
+```bash
+omni chat
+```
+
 Si quieres ver playbooks listos o sacar un comando PowerShell de auto-actualización:
 
 ```bash
@@ -34,6 +40,7 @@ Omni sirve para:
 - dejar backups automáticos
 - dejar mantenimiento diario con `systemd`
 - usar una terminal Windows/PowerShell solo como puente hacia Linux
+- hablar con Omni Agent en una interfaz conversacional real
 
 No intenta mezclar todo en Git. El código viaja por Git; el estado y los secretos viajan por `bundles`.
 
@@ -387,6 +394,49 @@ Imprime:
 - modelos sugeridos
 - documentación oficial
 
+### Prompt de activación
+
+Omni separa el proveedor principal de la identidad conversacional.
+
+- El proveedor principal lo eliges en `omni agent`
+- La identidad y propósito persistente viajan en `config/omni_agent_activation.txt`
+
+Ese archivo se crea automáticamente con `omni init` si no existe, viaja con `full-home` y sirve para que Omni/Codex conozca el propósito del workspace sin reemplazar el modelo elegido por el usuario.
+
+## Omni Chat
+
+`omni chat` abre una interfaz conversacional de terminal usando el provider elegido en `omni agent`.
+
+Comandos:
+
+```bash
+omni chat
+omni chat status
+omni chat "hazme un diagnóstico rápido del host"
+```
+
+Qué hace:
+
+- carga el provider principal configurado
+- aplica el prompt de activación persistente
+- guarda historial en `data/agent-chat`
+- soporta slash commands
+- puede sugerir comandos o listas de tareas por una capa de acciones separada
+
+Slash commands principales:
+
+- `/help`
+- `/status`
+- `/new`
+- `/clear`
+- `/save`
+- `/run`
+- `/todo`
+- `/exec on|off`
+- `/quit`
+
+La respuesta visible es conversacional normal. Si Omni necesita sugerir un comando o un plan, lo hace por debajo con acciones estructuradas para que el chat no suene a JSON ni a código.
+
 ### Nota sobre Claude 4.6
 
 En Omni:
@@ -406,6 +456,7 @@ Incluye:
 - diagnóstico rápido
 - rewrite de IP y hostname
 - configuración de `omni agent`
+- `omni chat`
 - bridge send
 - purge
 
@@ -470,6 +521,7 @@ Qué hace:
 |---|---|---|
 | `omni` | abre el asistente guiado | casi siempre |
 | `omni start` | igual que `omni` | cuando quieres ser explícito |
+| `omni commands` | muestra la superficie completa de comandos | cuando quieres recordar todo el mapa |
 | `omni examples` | imprime playbooks listos para copiar | cuando quieres guía rápida sin abrir todo el README |
 | `omni auto` | muestra automatización o genera el one-liner PowerShell | cuando quieres mantener o actualizar el host con un solo carril |
 | `omni doctor` | auditoría guiada del host | antes de migrar o después de restaurar |
@@ -509,6 +561,7 @@ Qué hace:
 | `omni transfer` | transfiere archivos/directorios | uso manual |
 | `omni detect-ip` | detecta identidad actual del host | ve drift |
 | `omni rewrite-ip` | reescribe referencias viejas | usa `--apply` para ejecutar |
+| `omni chat` | abre el chat operativo de Omni Agent | usa el provider configurado |
 | `omni bridge send` | envía bundles a destino remoto | puente |
 | `omni bridge receive` | restaura desde bundles recibidos | puente |
 
@@ -595,6 +648,13 @@ omni purge --include-secrets --yes
 
 ```bash
 omni agent list
+```
+
+### Quiero hablar con Omni normal
+
+```bash
+omni chat
+omni chat "revisa el host y dime los riesgos"
 ```
 
 ## Inventario de servidores remotos

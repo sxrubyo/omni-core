@@ -60,6 +60,7 @@ Y además:
 - `omni timer-install` deja también `omni-watch.service` para vigilar cambios del scope y disparar backup automático
 - `omni agent` abre el selector visual de proveedor para Claude, OpenAI, Azure OpenAI, Gemini, Bedrock, OpenRouter, xAI, Groq, Qwen, DeepSeek, Mistral, Cohere, Together, Perplexity o endpoint compatible
 - `omni agent list` te deja ver todo el catálogo sin entrar al wizard
+- `omni chat` abre la interfaz conversacional normal de Omni usando el provider principal que elegiste
 - `omni examples` imprime playbooks listos para copiar
 - `omni auto --p` imprime el comando PowerShell de auto-actualización listo para pegar
 
@@ -203,11 +204,23 @@ Todavía dentro de Ubuntu, pega esto:
 ```bash
 cd "$OMNI_DIR"
 omni
+omni agent
+omni chat
 omni doctor
 omni inventory
 docker compose ps
 sudo systemctl status omni-update.timer --no-pager
 ```
+
+`omni chat` usa el provider principal que dejaste en `omni agent`.
+
+La identidad persistente del chat vive en:
+
+```text
+config/omni_agent_activation.txt
+```
+
+Ese archivo se crea con `omni init` si no existe y viaja con `full-home`.
 
 ## Resumen ultra corto
 
@@ -231,6 +244,8 @@ cd "$OMNI_DIR"
 chmod +x install.sh bin/omni bootstrap.sh
 ./install.sh --compose --sync --timer
 omni
+omni agent
+omni chat
 omni doctor
 omni inventory
 ```
