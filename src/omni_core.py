@@ -1450,8 +1450,10 @@ class OmniCore:
                 except OSError:
                     continue
 
-    def bundle_search_dirs(self) -> List[Path]:
-        directories = [self.bundle_dir, self.auto_backup_dir()]
+    def bundle_search_dirs(self, *, include_auto: bool = True) -> List[Path]:
+        directories = [self.bundle_dir]
+        if include_auto:
+            directories.append(self.auto_backup_dir())
         unique: List[Path] = []
         seen: set[str] = set()
         for candidate in directories:
@@ -3099,12 +3101,12 @@ class OmniCore:
         self.init_workspace(profile=profile)
         selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         passphrase = self.read_passphrase(passphrase_env)
-        bundle_dirs = self.bundle_search_dirs()
+        bundle_dirs = self.bundle_search_dirs(include_auto=False)
         resolved_bundle_path = resolve_latest_bundle_across_dirs(bundle_dirs, bundle_path, "state_bundle")
         resolved_secrets_path = resolve_latest_bundle_across_dirs(bundle_dirs, secrets_path, "secrets_bundle")
         resolved_bundle = str(resolved_bundle_path or "")
         resolved_secrets = str(resolved_secrets_path or "")
-        runtime_inventory = resolve_installed_inventory_across_dirs(bundle_dirs)
+        runtime_inventory = resolve_installed_inventory_across_dirs(self.bundle_search_dirs())
         effective_manifest = merge_manifest_runtime_inventory(manifest, runtime_inventory)
         bootstrap_only = False
 
