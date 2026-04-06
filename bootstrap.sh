@@ -15,6 +15,15 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
+install_if_available() {
+  local package_name="$1"
+  if apt-cache show "$package_name" >/dev/null 2>&1; then
+    sudo apt-get install -y "$package_name"
+    return 0
+  fi
+  return 1
+}
+
 safe_update_repo() {
   local repo_dir="$1"
   local repo_url="$2"
@@ -35,9 +44,12 @@ safe_update_repo() {
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y git rsync openssh-client ca-certificates curl docker.io
-  if ! sudo apt-get install -y docker-compose-plugin; then
+  if install_if_available docker-compose-plugin; then
+    echo "docker-compose-plugin instalado."
+  elif install_if_available docker-compose; then
     echo "docker-compose-plugin no disponible. Intentando fallback a docker-compose..."
-    sudo apt-get install -y docker-compose || true
+  else
+    echo "No encontre docker-compose-plugin ni docker-compose en APT. Continúo sin instalar compose extra."
   fi
 fi
 
