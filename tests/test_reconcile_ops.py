@@ -13,7 +13,9 @@ if str(SRC) not in sys.path:
 from reconcile_ops import (  # noqa: E402
     build_compose_up_command,
     detect_compose_command,
+    docker_requires_sudo,
     ensure_supported_node_runtime,
+    ensure_docker_service_running,
     install_apt_packages,
     install_npm_global_packages,
 )
@@ -38,10 +40,51 @@ class ReconcileOpsTests(unittest.TestCase):
             compose_file = Path(tmp) / "docker-compose.yml"
             compose_file.write_text("services: {}\n", encoding="utf-8")
 
-            with mock.patch("reconcile_ops.detect_compose_command", return_value="docker-compose"):
+            with mock.patch("reconcile_ops.detect_compose_command", return_value="docker-compose"), \
+                 mock.patch("reconcile_ops.docker_requires_sudo", return_value=False):
                 command = build_compose_up_command(compose_file)
 
             self.assertEqual(command, f"docker-compose -f {str(compose_file)} up -d --build")
+
+    def test_build_compose_up_command_uses_sudo_when_docker_socket_requires_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            compose_file = Path(tmp) / "docker-compose.yml"
+            compose_file.write_text("services: {}\n", encoding="utf-8")
+
+            with mock.patch("reconcile_ops.detect_compose_command", return_value="docker-compose"), \
+                 mock.patch("reconcile_ops.docker_requires_sudo", return_value=True):
+                command = build_compose_up_command(compose_file)
+
+            self.assertEqual(command, f"sudo docker-compose -f {str(compose_file)} up -d --build")
+
+    def test_docker_requires_sudo_when_socket_not_writable(self):
+        with mock.patch("reconcile_ops.command_exists", side_effect=lambda name: name == "sudo"), \
+             mock.patch("reconcile_ops.Path.exists", return_value=True), \
+             mock.patch("reconcile_ops.os.access", return_value=False):
+            self.assertTrue(docker_requires_sudo())
+
+    def test_ensure_docker_service_running_starts_inactive_service(self):
+        calls = []
+
+        def fake_run(cmd: str, cwd=None):
+            calls.append(cmd)
+            if cmd == "command -v docker":
+                return (0, "/usr/bin/docker", "")
+            if cmd == "command -v systemctl":
+                return (0, "/usr/bin/systemctl", "")
+            if cmd == "systemctl is-active docker":
+                return (3, "inactive", "")
+            if cmd == "command -v sudo":
+                return (0, "/usr/bin/sudo", "")
+            if cmd == "sudo systemctl enable --now docker":
+                return (0, "started", "")
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        with mock.patch("reconcile_ops.run_cmd", side_effect=fake_run):
+            result = ensure_docker_service_running()
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["status"], "started")
 
     def test_install_apt_packages_falls_back_to_docker_compose_package(self):
         state = {"updated": False}

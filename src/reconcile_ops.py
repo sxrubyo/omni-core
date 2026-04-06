@@ -78,6 +78,29 @@ def command_exists(name: str) -> bool:
     return code == 0
 
 
+def docker_requires_sudo() -> bool:
+    if not command_exists("sudo"):
+        return False
+    socket_path = Path("/var/run/docker.sock")
+    if socket_path.exists() and not os.access(socket_path, os.R_OK | os.W_OK):
+        return True
+    code, _, err = run_cmd("docker info")
+    return code != 0 and "permission denied" in err.lower()
+
+
+def ensure_docker_service_running() -> Dict[str, Any]:
+    if not command_exists("docker") or not command_exists("systemctl"):
+        return {"changed": False, "status": "skipped"}
+    code, out, err = run_cmd("systemctl is-active docker")
+    if code == 0 and out.strip() == "active":
+        return {"changed": False, "status": "active"}
+    service_cmd = "sudo systemctl enable --now docker" if command_exists("sudo") else "systemctl enable --now docker"
+    code, out, err = run_visible_cmd(service_cmd, label="Activando servicio Docker")
+    if code != 0:
+        raise RuntimeError(err or out or "docker service start failed")
+    return {"changed": True, "status": "started"}
+
+
 def detect_compose_command() -> str:
     if command_exists("docker"):
         code, _, _ = run_cmd("docker compose version")
@@ -90,7 +113,8 @@ def detect_compose_command() -> str:
 
 def build_compose_up_command(compose_file: Path) -> str:
     compose_bin = detect_compose_command()
-    return f"{compose_bin} -f {shlex.quote(str(compose_file))} up -d --build"
+    prefix = "sudo " if docker_requires_sudo() else ""
+    return f"{prefix}{compose_bin} -f {shlex.quote(str(compose_file))} up -d --build"
 
 
 def apt_package_installed(name: str) -> bool:
@@ -359,6 +383,8 @@ def install_project_dependencies(targets: List[str]) -> List[Dict[str, Any]]:
 
 def start_compose_projects(projects: List[str]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    if projects:
+        ensure_docker_service_running()
     for raw_project in projects:
         project = Path(expand_path(raw_project))
         if not project.exists():
