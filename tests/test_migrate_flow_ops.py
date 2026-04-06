@@ -93,7 +93,7 @@ class MigrateFlowOpsTests(unittest.TestCase):
 
     def test_restore_host_cmd_hydrates_from_remote_source_in_bootstrap_mode(self):
         core = OmniCore()
-        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": ["/home/ubuntu"]}]
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10"}]
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -123,6 +123,24 @@ class MigrateFlowOpsTests(unittest.TestCase):
         reconcile_mock.assert_called_once()
         self.assertEqual(result["hydration_result"]["results"][0]["success"], True)
 
+    def test_hydrate_from_remote_servers_uses_host_root_for_full_home_profile(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": ["/home/ubuntu/melissa"]}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host_root = str(Path(tmp) / "source-home")
+            target_root = str(Path(tmp) / "restore")
+            with mock.patch("omni_core.build_remote_sync_command", return_value="echo ok") as build_mock, \
+                 mock.patch.object(core, "_run_transfer_cmd_visible", return_value=(0, "", "")):
+                result = core.hydrate_from_remote_servers(
+                    target_root=target_root,
+                    manifest={"profile": "full-home", "host_root": host_root},
+                )
+
+        build_mock.assert_called_once()
+        self.assertEqual(build_mock.call_args[0][1], host_root)
+        self.assertEqual(result["results"][0]["status"], "empty_import")
+
     def test_hydrate_from_remote_servers_skips_remote_omni_home_target(self):
         core = OmniCore()
         core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": [str(Path(core.root_dir))]}]
@@ -132,6 +150,18 @@ class MigrateFlowOpsTests(unittest.TestCase):
 
         transfer_mock.assert_not_called()
         self.assertEqual(result["results"][0]["status"], "skipped_omni_home")
+
+    def test_hydrate_from_remote_servers_marks_empty_import_as_incomplete(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": ["/home/ubuntu/melissa"]}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("omni_core.build_remote_sync_command", return_value="echo ok"), \
+                 mock.patch.object(core, "_run_transfer_cmd_visible", return_value=(0, "", "")):
+                result = core.hydrate_from_remote_servers(target_root=tmp)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["results"][0]["status"], "empty_import")
 
 
 if __name__ == "__main__":

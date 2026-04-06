@@ -35,26 +35,44 @@ class SyncRuntimeOpsTests(unittest.TestCase):
 
     def test_resolve_server_identity_file_prefers_explicit_env_then_auto(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ssh_dir = Path(tmp)
-            auto_key = ssh_dir / "n8n_nova"
-            auto_key.write_text("PRIVATE", encoding="utf-8")
+            explicit_dir = Path(tmp) / "explicit"
+            explicit_dir.mkdir()
+            custom_key = explicit_dir / "custom.pem"
+            custom_key.write_text("PRIVATE", encoding="utf-8")
+            explicit = resolve_server_identity_file({"identity_file": str(custom_key)}, ssh_dir=explicit_dir)
+            self.assertEqual(explicit, str(custom_key))
 
-            explicit = resolve_server_identity_file({"identity_file": "~/custom.pem"}, ssh_dir=ssh_dir)
-            self.assertTrue(explicit.endswith("custom.pem"))
-
+            env_dir = Path(tmp) / "env"
+            env_dir.mkdir()
+            env_key = env_dir / "env-key.pem"
+            env_key.write_text("PRIVATE", encoding="utf-8")
             old_env = os.environ.get("OMNI_SSH_IDENTITY_FILE")
-            os.environ["OMNI_SSH_IDENTITY_FILE"] = "/tmp/env-key.pem"
+            os.environ["OMNI_SSH_IDENTITY_FILE"] = str(env_key)
             try:
-                env_value = resolve_server_identity_file({}, ssh_dir=ssh_dir)
-                self.assertEqual(env_value, "/tmp/env-key.pem")
+                env_value = resolve_server_identity_file({}, ssh_dir=env_dir)
+                self.assertEqual(env_value, str(env_key))
             finally:
                 if old_env is None:
                     os.environ.pop("OMNI_SSH_IDENTITY_FILE", None)
                 else:
                     os.environ["OMNI_SSH_IDENTITY_FILE"] = old_env
 
-            auto_value = resolve_server_identity_file({}, ssh_dir=ssh_dir, env={})
+            auto_dir = Path(tmp) / "auto"
+            auto_dir.mkdir()
+            auto_key = auto_dir / "n8n_nova"
+            auto_key.write_text("PRIVATE", encoding="utf-8")
+            auto_value = resolve_server_identity_file({}, ssh_dir=auto_dir, env={})
             self.assertEqual(auto_value, str(auto_key))
+
+    def test_resolve_server_identity_file_ignores_missing_explicit_key_and_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ssh_dir = Path(tmp)
+            auto_key = ssh_dir / "n8n_nova"
+            auto_key.write_text("PRIVATE", encoding="utf-8")
+
+            explicit = resolve_server_identity_file({"identity_file": str(ssh_dir / "missing.pem")}, ssh_dir=ssh_dir)
+
+            self.assertEqual(explicit, str(auto_key))
 
     def test_build_remote_sync_command_includes_identity_file_for_rsync(self):
         with tempfile.TemporaryDirectory() as tmp:

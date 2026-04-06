@@ -89,7 +89,7 @@ cat <<EOF
 Omni Core instalado en: $ROOT_DIR
 
 Modo automático:
-  install.sh --compose --sync --timer
+  ./install.sh --compose --sync --timer
 
 Archivos clave:
   .env

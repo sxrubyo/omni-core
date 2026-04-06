@@ -163,7 +163,9 @@ def resolve_server_identity_file(
     env_map = os.environ if env is None else env
     explicit = str(server.get("identity_file") or env_map.get("OMNI_SSH_IDENTITY_FILE") or "").strip()
     if explicit:
-        return str(Path(os.path.expandvars(explicit)).expanduser())
+        explicit_path = Path(os.path.expandvars(explicit)).expanduser()
+        if explicit_path.exists():
+            return str(explicit_path)
 
     candidates = discover_ssh_identity_candidates(ssh_dir)
     if len(candidates) == 1:
@@ -1661,13 +1663,47 @@ class OmniCore:
             "results": results,
         }
 
-    def has_ready_remote_source(self) -> bool:
+    def has_ready_remote_source(self, manifest: Optional[Dict[str, Any]] = None) -> bool:
         for server in self.servers:
             host = str(server.get("host", "")).strip()
-            paths = server.get("paths", [])
+            paths = self.resolve_hydration_paths(server, manifest)
             if host and host != "1.2.3.4" and paths:
                 return True
         return False
+
+    def resolve_hydration_paths(self, server: Dict[str, Any], manifest: Optional[Dict[str, Any]] = None) -> List[str]:
+        host = str(server.get("host", "")).strip()
+        if not host or host == "1.2.3.4":
+            return []
+
+        profile = self.normalize_profile(str((manifest or {}).get("profile", "")))
+        host_root = str((manifest or {}).get("host_root") or Path.home()).strip()
+        if profile == FULL_HOME_PROFILE and host_root:
+            return [host_root]
+
+        return [str(path).strip() for path in (server.get("paths", []) or []) if str(path).strip()]
+
+    def _snapshot_local_path(self, path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            return {"kind": "missing", "entries": 0, "size_bytes": 0}
+        if path.is_file():
+            try:
+                size_bytes = path.stat().st_size
+            except OSError:
+                size_bytes = 0
+            return {"kind": "file", "entries": 1, "size_bytes": size_bytes}
+
+        entries = 0
+        size_bytes = 0
+        for root, dirs, files in os.walk(path):
+            entries += len(dirs) + len(files)
+            for file_name in files:
+                candidate = Path(root) / file_name
+                try:
+                    size_bytes += candidate.stat().st_size
+                except OSError:
+                    continue
+        return {"kind": "dir", "entries": entries, "size_bytes": size_bytes}
 
     def _run_transfer_cmd_visible(self, cmd: str, label: str) -> Tuple[int, str, str]:
         info(label)
@@ -1694,7 +1730,7 @@ class OmniCore:
                 return -1, "", str(exc)
         return self.transfer._run_cmd(cmd)
 
-    def hydrate_from_remote_servers(self, target_root: str = "/") -> Dict[str, Any]:
+    def hydrate_from_remote_servers(self, target_root: str = "/", manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         logger = logging.getLogger("omni.core")
         results: List[Dict[str, Any]] = []
         root = Path(target_root).resolve()
@@ -1708,7 +1744,7 @@ class OmniCore:
             host = str(server.get("host", "")).strip()
             port = int(server.get("port", 22))
             protocol = server.get("protocol", "rsync")
-            paths = server.get("paths", [])
+            paths = self.resolve_hydration_paths(server, manifest)
             excludes = server.get("excludes", [])
 
             if not host or host == "1.2.3.4" or not paths:
@@ -1736,6 +1772,7 @@ class OmniCore:
                         continue
                 except ValueError:
                     pass
+                before_snapshot = self._snapshot_local_path(destination)
                 destination.mkdir(parents=True, exist_ok=True)
                 cmd = build_remote_sync_command(
                     {
@@ -1757,18 +1794,33 @@ class OmniCore:
                     cmd,
                     f"Importando contenido remoto {name}:{remote_path} -> {destination}",
                 )
+                after_snapshot = self._snapshot_local_path(destination)
                 error = err if code != 0 else ""
                 if code != 0 and "Permission denied (publickey)" in error:
                     hint = "Configure `identity_file` in config/servers.json o deja una única clave privada utilizable en ~/.ssh."
                     error = f"{error}\n{hint}"
+                empty_import = (
+                    code == 0
+                    and before_snapshot.get("entries", 0) == 0
+                    and after_snapshot.get("kind") == "dir"
+                    and after_snapshot.get("entries", 0) == 0
+                )
+                if empty_import:
+                    error = (
+                        "La importación remota terminó sin materializar archivos en el destino. "
+                        "Revisa la ruta origen y la clave SSH del servidor fuente."
+                    )
                 results.append({
                     "server": name,
                     "path": remote_path,
                     "protocol": protocol,
-                    "success": code == 0,
+                    "success": code == 0 and not empty_import,
                     "target": str(destination),
                     "error": error,
                     "output": out if code == 0 else "",
+                    "status": "empty_import" if empty_import else ("ok" if code == 0 else "failed"),
+                    "before": before_snapshot,
+                    "after": after_snapshot,
                 })
 
         ok_count = sum(1 for item in results if item.get("success"))
@@ -3249,8 +3301,8 @@ class OmniCore:
             return {"success": False, "reason": "cancelled"}
 
         if bootstrap_only:
-            if self.has_ready_remote_source():
-                hydration_result = self.hydrate_from_remote_servers(target_root=target_root)
+            if self.has_ready_remote_source(manifest):
+                hydration_result = self.hydrate_from_remote_servers(target_root=target_root, manifest=manifest)
                 if hydration_result.get("success"):
                     ok(hydration_result.get("message", "Remote content imported"))
                 else:

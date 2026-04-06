@@ -8,10 +8,7 @@
       "identity_file": "~/.ssh/llave-xus-maestra.pem",
       "protocol": "rsync",
       "paths": [
-        "/home/ubuntu/melissa",
-        "/home/ubuntu/nova-os",
-        "/home/ubuntu/.nova",
-        "/home/ubuntu/omni-core"
+        "/home/ubuntu"
       ],
       "excludes": [
         ".git",
