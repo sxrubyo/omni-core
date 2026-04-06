@@ -30,6 +30,21 @@ def command_exists(name: str) -> bool:
     return code == 0
 
 
+def detect_compose_command() -> str:
+    if command_exists("docker"):
+        code, _, _ = run_cmd("docker compose version")
+        if code == 0:
+            return "docker compose"
+    if command_exists("docker-compose"):
+        return "docker-compose"
+    return "docker compose"
+
+
+def build_compose_up_command(compose_file: Path) -> str:
+    compose_bin = detect_compose_command()
+    return f"{compose_bin} -f {shlex.quote(str(compose_file))} up -d --build"
+
+
 def install_apt_packages(packages: List[str]) -> Dict[str, Any]:
     requested = [pkg for pkg in packages if pkg]
     if not requested or not command_exists("apt-get"):
@@ -195,7 +210,7 @@ def start_compose_projects(projects: List[str]) -> List[Dict[str, Any]]:
         if not compose_file:
             results.append({"path": str(project), "status": "skipped"})
             continue
-        code, out, err = run_cmd(f"docker compose -f {shlex.quote(str(compose_file))} up -d --build", cwd=str(project))
+        code, out, err = run_cmd(build_compose_up_command(compose_file), cwd=str(project))
         if code != 0:
             raise RuntimeError(err or out or f"docker compose failed for {project}")
         results.append({"path": str(project), "status": "started", "compose_file": str(compose_file)})

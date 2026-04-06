@@ -135,6 +135,147 @@ def load_env_file(env_path: Path) -> None:
 
 load_env_file(ENV_FILE)
 
+SSH_METADATA_FILES = {"authorized_keys", "config"}
+
+
+def discover_ssh_identity_candidates(ssh_dir: Path | None = None) -> List[Path]:
+    base_dir = Path(ssh_dir).expanduser() if ssh_dir else (Path.home() / ".ssh")
+    if not base_dir.exists() or not base_dir.is_dir():
+        return []
+
+    candidates: List[Path] = []
+    for candidate in sorted(base_dir.iterdir()):
+        name = candidate.name
+        if not candidate.is_file():
+            continue
+        if name in SSH_METADATA_FILES or name.endswith(".pub") or name.startswith("known_hosts"):
+            continue
+        candidates.append(candidate.resolve())
+    return candidates
+
+
+def resolve_server_identity_file(
+    server: Dict[str, Any],
+    ssh_dir: Path | None = None,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
+    env_map = os.environ if env is None else env
+    explicit = str(server.get("identity_file") or env_map.get("OMNI_SSH_IDENTITY_FILE") or "").strip()
+    if explicit:
+        return str(Path(os.path.expandvars(explicit)).expanduser())
+
+    candidates = discover_ssh_identity_candidates(ssh_dir)
+    if len(candidates) == 1:
+        return str(candidates[0])
+    return ""
+
+
+def _normalize_ssh_options(raw_options: Any) -> List[str]:
+    if not raw_options:
+        return []
+    if isinstance(raw_options, str):
+        return [raw_options]
+    if isinstance(raw_options, list):
+        return [str(option).strip() for option in raw_options if str(option).strip()]
+    return []
+
+
+def build_ssh_transport_command(
+    server: Dict[str, Any],
+    ssh_dir: Path | None = None,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
+    port = int(server.get("port", 22))
+    command: List[str] = ["ssh", "-p", str(port), "-o", "StrictHostKeyChecking=accept-new"]
+    identity_file = resolve_server_identity_file(server, ssh_dir=ssh_dir, env=env)
+    if identity_file:
+        command.extend(["-i", identity_file])
+    for option in _normalize_ssh_options(server.get("ssh_options")):
+        if option.startswith("-"):
+            command.append(option)
+        else:
+            command.extend(["-o", option])
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def build_remote_sync_command(
+    server: Dict[str, Any],
+    remote_path: str,
+    target_dir: Path,
+    *,
+    ssh_dir: Path | None = None,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
+    user = str(server.get("user", "ubuntu"))
+    host = str(server.get("host", "")).strip()
+    port = int(server.get("port", 22))
+    protocol = str(server.get("protocol", "rsync")).strip().lower()
+    excludes = [str(pattern) for pattern in server.get("excludes", []) or [] if str(pattern).strip()]
+    identity_file = resolve_server_identity_file(server, ssh_dir=ssh_dir, env=env)
+
+    if protocol == "scp":
+        parts: List[str] = ["scp", "-P", str(port), "-o", "StrictHostKeyChecking=accept-new"]
+        if identity_file:
+            parts.extend(["-i", identity_file])
+        for option in _normalize_ssh_options(server.get("ssh_options")):
+            if option.startswith("-"):
+                parts.append(option)
+            else:
+                parts.extend(["-o", option])
+        parts.extend(["-r", f"{user}@{host}:{remote_path}", str(target_dir)])
+        return " ".join(shlex.quote(part) for part in parts)
+
+    exclude_flags = " ".join(f"--exclude {shlex.quote(pattern)}" for pattern in excludes)
+    transport = build_ssh_transport_command(server, ssh_dir=ssh_dir, env=env)
+    remote_spec = f"{user}@{host}:{shlex.quote(remote_path.rstrip('/') + '/')}"
+    return (
+        f"rsync -az --delete -e {shlex.quote(transport)} {exclude_flags} "
+        f"{remote_spec} {shlex.quote(str(target_dir))}/"
+    ).strip()
+
+
+def resolve_latest_bundle_across_dirs(
+    bundle_dirs: List[Path],
+    explicit_path: str,
+    prefix: str,
+) -> Optional[Path]:
+    if explicit_path:
+        explicit = Path(explicit_path).expanduser()
+        return explicit if explicit.exists() else explicit
+
+    seen: set[str] = set()
+    for bundle_dir in bundle_dirs:
+        bundle_root = Path(bundle_dir).expanduser()
+        key = str(bundle_root.resolve()) if bundle_root.exists() else str(bundle_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate = latest_or_explicit(bundle_root, "", prefix)
+        if candidate and candidate.exists():
+            return candidate
+    return None
+
+
+def resolve_installed_inventory_across_dirs(
+    bundle_dirs: List[Path],
+    explicit_path: str = "",
+) -> Optional[Dict[str, Any]]:
+    if explicit_path:
+        explicit = Path(explicit_path).expanduser()
+        return load_installed_inventory(explicit.parent, explicit_path=str(explicit))
+
+    seen: set[str] = set()
+    for bundle_dir in bundle_dirs:
+        bundle_root = Path(bundle_dir).expanduser()
+        key = str(bundle_root.resolve()) if bundle_root.exists() else str(bundle_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        payload = load_installed_inventory(bundle_root)
+        if payload:
+            return payload
+    return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PLATFORM COMPATIBILITY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1114,7 +1255,18 @@ class OmniCore:
         try:
             server_data = json.loads(SERVERS_FILE.read_text(encoding="utf-8"))
             servers = server_data.get("servers", server_data) if isinstance(server_data, dict) else server_data
-            return servers if isinstance(servers, list) else []
+            if not isinstance(servers, list):
+                return []
+            normalized: List[Dict[str, Any]] = []
+            for server in servers:
+                if not isinstance(server, dict):
+                    continue
+                item = dict(server)
+                identity_file = str(item.get("identity_file") or "").strip()
+                if identity_file:
+                    item["identity_file"] = str(Path(os.path.expandvars(identity_file)).expanduser())
+                normalized.append(item)
+            return normalized
         except Exception as e:
             debug(f"Failed to load servers.json: {e}")
             return []
@@ -1236,6 +1388,18 @@ class OmniCore:
                     stale.unlink()
                 except OSError:
                     continue
+
+    def bundle_search_dirs(self) -> List[Path]:
+        directories = [self.bundle_dir, self.auto_backup_dir()]
+        unique: List[Path] = []
+        seen: set[str] = set()
+        for candidate in directories:
+            resolved = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(candidate)
+        return unique
 
     def create_recovery_pack(
         self,
@@ -1392,25 +1556,33 @@ class OmniCore:
             for remote_path in paths:
                 target_dir = server_root / path_to_snapshot_name(remote_path)
                 target_dir.mkdir(parents=True, exist_ok=True)
-                exclude_flags = " ".join([f"--exclude {shlex.quote(pattern)}" for pattern in excludes])
-
-                if protocol == "scp":
-                    cmd = f"scp -P {port} -r {user}@{host}:{shlex.quote(remote_path)} {shlex.quote(str(target_dir))}"
-                else:
-                    cmd = (
-                        f"rsync -az --delete -e \"ssh -p {port}\" {exclude_flags} "
-                        f"{user}@{host}:{shlex.quote(remote_path.rstrip('/') + '/') } {shlex.quote(str(target_dir))}/"
-                    )
+                cmd = build_remote_sync_command(
+                    {
+                        "user": user,
+                        "host": host,
+                        "port": port,
+                        "protocol": protocol,
+                        "excludes": excludes,
+                        "identity_file": server.get("identity_file", ""),
+                        "ssh_options": server.get("ssh_options", []),
+                    },
+                    remote_path,
+                    target_dir,
+                )
 
                 logger.info("Syncing %s:%s", name, remote_path)
                 code, out, err = self.transfer._run_cmd(cmd)
+                error = err if code != 0 else ""
+                if code != 0 and "Permission denied (publickey)" in error:
+                    hint = "Configure `identity_file` in config/servers.json or leave a single private key in ~/.ssh."
+                    error = f"{error}\n{hint}"
                 results.append({
                     "server": name,
                     "path": remote_path,
                     "protocol": protocol,
                     "success": code == 0,
                     "target": str(target_dir),
-                    "error": err if code != 0 else "",
+                    "error": error,
                     "output": out if code == 0 else "",
                 })
 
@@ -2669,13 +2841,15 @@ class OmniCore:
         kv("Bundle Dir", str(self.bundle_dir), color=C.GRN)
         nl()
 
-        bundle_summary = summarize_bundle_pair(bundle_dir=self.bundle_dir)
-        if bundle_summary.get("state_bundle"):
-            kv("Latest State Bundle", str(bundle_summary["state_bundle"]["path"]), color=C.GRN)
+        bundle_dirs = self.bundle_search_dirs()
+        latest_state_bundle = resolve_latest_bundle_across_dirs(bundle_dirs, "", "state_bundle")
+        latest_secrets_bundle = resolve_latest_bundle_across_dirs(bundle_dirs, "", "secrets_bundle")
+        if latest_state_bundle:
+            kv("Latest State Bundle", str(latest_state_bundle), color=C.GRN)
         else:
             warn("No state bundle found yet. Run `omni capture`.")
-        if bundle_summary.get("secrets_bundle"):
-            kv("Latest Secrets Bundle", str(bundle_summary["secrets_bundle"]["path"]), color=C.GRN)
+        if latest_secrets_bundle:
+            kv("Latest Secrets Bundle", str(latest_secrets_bundle), color=C.GRN)
         else:
             warn("No secrets bundle found yet. Run `omni capture`.")
         nl()
@@ -2699,7 +2873,22 @@ class OmniCore:
         target_hostname: str = "",
     ) -> Dict[str, Any]:
         scan_root = Path(root).expanduser() if root else Path.home()
-        context = build_host_rewrite_context(
+        context = None
+        source_bundle_dir = self.bundle_dir
+        for bundle_dir in self.bundle_search_dirs():
+            candidate = build_host_rewrite_context(
+                bundle_dir,
+                target_public_ip=target_public_ip,
+                target_private_ip=target_private_ip,
+                target_hostname=target_hostname,
+            )
+            if candidate.get("summary_found"):
+                context = candidate
+                source_bundle_dir = bundle_dir
+                break
+            if context is None:
+                context = candidate
+        context = context or build_host_rewrite_context(
             self.bundle_dir,
             target_public_ip=target_public_ip,
             target_private_ip=target_private_ip,
@@ -2709,6 +2898,7 @@ class OmniCore:
         return {
             "scan_root": str(scan_root),
             "context": context,
+            "bundle_dir": str(source_bundle_dir),
             "plan": plan,
             "changed_files": plan.changed_files if plan else 0,
             "total_replacements": plan.total_replacements if plan else 0,
@@ -2839,26 +3029,36 @@ class OmniCore:
         show_summary: bool = True,
         auto_backup: bool = True,
         before_services=None,
+        allow_missing_bundles: bool = False,
     ):
         print_logo(compact=True)
         section("Restore Host")
         self.init_workspace(profile=profile)
         selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         passphrase = self.read_passphrase(passphrase_env)
-        resolved_bundle = str(latest_or_explicit(self.bundle_dir, bundle_path, "state_bundle") or "")
-        resolved_secrets = str(latest_or_explicit(self.bundle_dir, secrets_path, "secrets_bundle") or "")
-        runtime_inventory = load_installed_inventory(self.bundle_dir)
+        bundle_dirs = self.bundle_search_dirs()
+        resolved_bundle_path = resolve_latest_bundle_across_dirs(bundle_dirs, bundle_path, "state_bundle")
+        resolved_secrets_path = resolve_latest_bundle_across_dirs(bundle_dirs, secrets_path, "secrets_bundle")
+        resolved_bundle = str(resolved_bundle_path or "")
+        resolved_secrets = str(resolved_secrets_path or "")
+        runtime_inventory = resolve_installed_inventory_across_dirs(bundle_dirs)
         effective_manifest = merge_manifest_runtime_inventory(manifest, runtime_inventory)
+        bootstrap_only = False
 
-        if not resolved_bundle:
-            fail("State bundle not found. Run `omni capture` or pass --bundle.")
-            return
-        if not resolved_secrets:
-            fail("Secrets bundle not found. Run `omni capture` or pass --secrets.")
-            return
+        if not resolved_bundle or not resolved_secrets:
+            if not allow_missing_bundles:
+                if not resolved_bundle:
+                    fail("State bundle not found. Run `omni capture` or pass --bundle.")
+                if not resolved_secrets:
+                    fail("Secrets bundle not found. Run `omni capture` or pass --secrets.")
+                return {"success": False, "reason": "missing_bundle"}
+            bootstrap_only = True
+            warn("No bundle set found. Continuing in bootstrap mode from manifest and installed inventory only.")
+            resolved_bundle = ""
+            resolved_secrets = ""
         if not self.confirm_step("Restore and reconcile this host now?", accept_all=accept_all):
             warn("Restore cancelled.")
-            return
+            return {"success": False, "reason": "cancelled"}
 
         report = reconcile_host(
             effective_manifest,
@@ -2892,6 +3092,7 @@ class OmniCore:
             pm2_step = step_map.get("pm2", {})
             summary_lines = [
                 f"Perfil activo: {manifest.get('profile', DEFAULT_PROFILE)}",
+                f"Modo: {'bootstrap' if bootstrap_only else 'bundle-restore'}",
                 f"Archivos de estado restaurados: {restore_state.get('restored', 0)}",
                 f"Archivos de secretos restaurados: {restore_secrets.get('restored', 0)}",
                 f"Inventario instalado: {'detectado' if runtime_inventory else 'no'}",
@@ -2907,6 +3108,13 @@ class OmniCore:
             render_action_summary("Restore completo", summary_lines, accent=C.GRN)
         else:
             self.write_json_output(report)
+        return {
+            "success": True,
+            "report": report,
+            "bootstrap_only": bootstrap_only,
+            "used_bundles": bool(resolved_bundle and resolved_secrets),
+            "runtime_inventory": runtime_inventory,
+        }
 
     def detect_ip_cmd(self):
         print_logo(compact=True)
@@ -3031,7 +3239,7 @@ class OmniCore:
                 "replacements": drift["total_replacements"],
             }
 
-        self.restore_host_cmd(
+        restore_result = self.restore_host_cmd(
             manifest_path=manifest_path,
             home_root=home_root,
             bundle_path=bundle_path,
@@ -3045,7 +3253,10 @@ class OmniCore:
             show_summary=False,
             auto_backup=False,
             before_services=before_services_hook,
+            allow_missing_bundles=True,
         )
+        if not restore_result or not restore_result.get("success"):
+            return
         if AUTO_BACKUP_ON_CHANGE:
             info("Creando backup automático post-migrate...")
             self.run_backup(
@@ -3058,6 +3269,7 @@ class OmniCore:
         if self.is_interactive():
             lines = [
                 f"Plataforma detectada: {info_obj.system} / {info_obj.shell}",
+                f"Modo de migracion: {'bootstrap' if restore_result.get('bootstrap_only') else 'bundle-restore'}",
                 f"Reescritura de referencias: {rewrite_status}",
                 f"Archivos corregidos: {rewrite_files}",
                 "",

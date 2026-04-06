@@ -8,6 +8,7 @@ AUTO_SYNC=false
 USE_PM2=false
 INSTALL_TIMER=false
 TIMER_ON_CALENDAR="${OMNI_TIMER_ON_CALENDAR:-daily}"
+PROFILE="${OMNI_PROFILE:-full-home}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -18,6 +19,23 @@ for arg in "$@"; do
     --on-calendar=*) TIMER_ON_CALENDAR="${arg#*=}" ;;
   esac
 done
+
+should_run_sync() {
+  local servers_file="$ROOT_DIR/config/servers.json"
+  if [ ! -f "$servers_file" ]; then
+    return 1
+  fi
+  if grep -q '"1.2.3.4"' "$servers_file"; then
+    return 1
+  fi
+  if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    return 0
+  fi
+  if [ -d "$HOME/.ssh" ] && find "$HOME/.ssh" -maxdepth 1 -type f ! -name "*.pub" ! -name "authorized_keys" ! -name "known_hosts*" ! -name "config" | grep -q .; then
+    return 0
+  fi
+  return 1
+}
 
 mkdir -p "$ROOT_DIR/config" "$ROOT_DIR/config/systemd" "$ROOT_DIR/data/servers" "$ROOT_DIR/backups/host-bundles" "$ROOT_DIR/logs"
 
@@ -45,10 +63,14 @@ else
   ln -sf "$ROOT_DIR/bin/omni" "$BIN_TARGET"
 fi
 
-"$ROOT_DIR/bin/omni" init >/dev/null || true
+"$ROOT_DIR/bin/omni" init --profile "$PROFILE" >/dev/null || true
 
 if $AUTO_SYNC; then
-  "$ROOT_DIR/bin/omni" sync || true
+  if should_run_sync; then
+    "$ROOT_DIR/bin/omni" sync || true
+  else
+    echo "Skipping initial sync: no remote SSH identity configured yet or servers.json still uses placeholders."
+  fi
 fi
 
 if $USE_PM2; then
@@ -56,7 +78,7 @@ if $USE_PM2; then
 fi
 
 if $USE_COMPOSE; then
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d --build
+  "$ROOT_DIR/bin/omni" migrate --accept-all --skip-rewrite --profile "$PROFILE"
 fi
 
 if $INSTALL_TIMER; then
@@ -90,5 +112,5 @@ Comandos:
   omni reconcile
   omni timer-install
   omni sync
-  docker compose ps
+  omni migrate --accept-all --skip-rewrite
 EOF

@@ -5,6 +5,7 @@
       "host": "1.2.3.4",
       "user": "ubuntu",
       "port": 22,
+      "identity_file": "~/.ssh/llave-xus-maestra.pem",
       "protocol": "rsync",
       "paths": [
         "/home/ubuntu/melissa",
