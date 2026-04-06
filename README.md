@@ -4,8 +4,8 @@ Omni Core está orientado a restaurar un entorno productivo limpio en Linux o un
 
 Ahora el punto de entrada recomendado ya no es memorizar comandos bajos: es ejecutar `omni` o `omni start` y dejar que la CLI te guíe hacia `bridge`, `capture`, `restore`, `migrate` o `doctor`.
 
-No intenta clonar `/home/ubuntu` tal cual.
-La regla es otra: preservar lo que sí construye producto y separar lo que debe viajar aparte.
+Por defecto no intenta clonar `/home/ubuntu` tal cual.
+La regla base es preservar lo que sí construye producto y separar lo que debe viajar aparte. Si activas `full-home`, entonces sí captura literalmente todo `/home/ubuntu` como estado raíz y mantiene secretos aparte.
 
 ## Flujo productivo limpio
 
@@ -77,6 +77,47 @@ Omni usa perfiles de manifest para decidir qué captura y cómo activa la migrac
 - `omni init --profile full-home`: activa el perfil completo antes de capturar o migrar
 - `omni init --profile production-clean`: vuelve al perfil productivo limpio
 
+### Qué entra realmente en `full-home`
+
+Si activas `full-home`, Omni trata `/home/ubuntu` entero como estado. Eso significa que sí entran, entre otras cosas:
+
+- `.codex`
+- `.agents`
+- `.nova`
+- `.n8n`
+- `melissa`
+- `melissa-instances`
+- `whatsapp-bridge`
+- `nova-os`
+- `Workflows-n8n`
+- `xus-https`
+- `melissa-backups`
+
+`melissa-backups` importa si de verdad quieres poder reconstruir el host “con todo”. Suele ser uno de los bloques más pesados porque guarda respaldos históricos de Melissa. No es código fuente; es estado archivado.
+
+### GitHub público por unos segundos: qué sí y qué no
+
+Poner el repo de GitHub público por unos segundos sí puede hacer más fácil clonar `omni-core` o bajar el bootstrap en una máquina virgen.
+
+Pero eso no sustituye una migración real. GitHub solo resuelve mejor el transporte del código del repositorio. No reemplaza:
+
+- bundles de estado
+- secrets pack
+- `.env`
+- claves SSH
+- sesiones
+- datos de `n8n`
+- dumps de PM2
+- estado vivo de `/home/ubuntu`
+
+La forma correcta sigue siendo:
+
+1. clonar o descargar `omni-core`
+2. ejecutar `omni init --profile full-home` si quieres todo `/home/ubuntu`
+3. correr `omni capture`
+4. mover `state bundle` + `secrets bundle`
+5. restaurar con `omni restore` o `omni migrate`
+
 ## Modos de instalación
 
 ### 0. Guía simple desde GitHub
@@ -107,7 +148,6 @@ Desde otra PC, incluyendo PowerShell en Windows:
 
 ```powershell
 pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omni-core.git -Branch main -InstallTimer
-
 Si no pasas `-Destination`, `bootstrap.ps1` escanea el host remoto, recomienda rutas y te deja elegir o escribir una personalizada.
 ```
 

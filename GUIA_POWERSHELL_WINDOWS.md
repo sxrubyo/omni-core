@@ -10,6 +10,22 @@ La experiencia nueva recomendada es:
 4. eliges `bridge`, `capture`, `restore`, `migrate` o `doctor`
 5. si quieres llevarte todo `/home/ubuntu`, activas `omni init --profile full-home`
 
+## Qué entra cuando usas `full-home`
+
+Si activas `full-home`, Omni toma `/home/ubuntu` entero como estado. Eso incluye también `.codex`, `.agents`, `.nova`, `.n8n` y carpetas pesadas como `melissa-backups`.
+
+`melissa-backups` importa si quieres una reconstrucción realmente completa. Es histórico de respaldos de Melissa y puede ocupar bastante disco.
+
+## Si pones el repo público por unos segundos
+
+Eso sí puede simplificar el `clone` inicial de `omni-core` desde una máquina virgen.
+
+Pero no reemplaza una migración real. GitHub público solo te ayuda con el código del bootstrap. El resto sigue viajando por:
+
+- `state bundle`
+- `secrets bundle`
+- restore/migrate
+
 Si no quieres entrar en claves, `pem` o SSH remoto desde PowerShell, usa mejor esta guía:
 
 - [GUIA_INSTALACION_SIMPLE_GITHUB.md](/home/ubuntu/omni-core/GUIA_INSTALACION_SIMPLE_GITHUB.md)

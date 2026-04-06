@@ -1651,6 +1651,33 @@ class OmniCore:
         selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         bundle_dir = self.capture_output_dir(output)
         passphrase = self.read_passphrase(passphrase_env)
+        report = scan_home(home_root or manifest.get("host_root") or str(Path.home()), manifest)
+
+        if self.is_interactive():
+            discovered = sorted(report["discovered"], key=lambda item: item.get("size_bytes", 0), reverse=True)
+            preflight_lines = [
+                f"Perfil activo: {manifest.get('profile', DEFAULT_PROFILE)}",
+                f"Raíz de captura: {manifest.get('host_root', str(Path.home()))}",
+                f"Estado total declarado: {human_size(sum(int(item.get('size_bytes', 0)) for item in report['included'] if item.get('kind') == 'state'))}",
+                f"Secretos separados: {len([item for item in report['included'] if item.get('kind') == 'secret'])}",
+                "",
+                "Directorios grandes dentro del scope:",
+            ]
+            for item in discovered[:8]:
+                classification = str(item.get("classification", "uncategorized")).upper()
+                preflight_lines.append(f"{classification}: {item['path']} · {human_size(int(item.get('size_bytes', 0)))}")
+            if any(str(item.get("name")) == ".codex" for item in discovered):
+                preflight_lines.extend(
+                    [
+                        "",
+                        "Nota: `.codex` sí entra en full-home. Lo mismo aplica para skills, `.agents` y backups locales.",
+                    ]
+                )
+            if any(str(item.get("name")) == "melissa-backups" for item in discovered):
+                preflight_lines.append(
+                    "Nota: `melissa-backups` también entra en full-home. Suele ser el bloque más pesado porque guarda respaldos históricos de Melissa."
+                )
+            render_action_summary("Preflight de captura", preflight_lines, accent=C.YLW)
 
         if not self.confirm_step("Create state bundle now?", accept_all=accept_all):
             warn("Capture cancelled before state bundle creation.")
@@ -2013,6 +2040,8 @@ class OmniCore:
                 nl()
                 hint("`.codex` está dentro de full-home porque el scope activo es /home/ubuntu completo.")
                 hint("Si luego quieres una captura más liviana, toca excluirlo explícitamente o usar production-clean.")
+            if any(str(item.get("name")) == "melissa-backups" for item in discovered):
+                hint("`melissa-backups` también entra en full-home y puede inflar mucho el bundle por sus respaldos históricos.")
 
         if output:
             payload = {

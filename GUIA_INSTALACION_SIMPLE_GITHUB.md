@@ -9,6 +9,41 @@ La regla nueva es simple:
 - deja que el CLI te pregunte si quieres `bridge`, `capture`, `restore`, `migrate` o `doctor`
 - si quieres llevarte todo `/home/ubuntu`, primero corre `omni init --profile full-home`
 
+## Qué significa `full-home` de verdad
+
+Si activas:
+
+```bash
+omni init --profile full-home
+```
+
+entonces Omni considera `/home/ubuntu` entero como estado. Eso incluye también:
+
+- `.codex`
+- `.agents`
+- `.nova`
+- `.n8n`
+- `melissa-backups`
+- y cualquier otra carpeta real que viva dentro de `/home/ubuntu`
+
+`melissa-backups` importa si quieres poder reconstruir “todo”. No es código; son respaldos históricos de Melissa, y normalmente es de las carpetas más pesadas.
+
+## Poner el repo público: qué sí resuelve
+
+Si alguna vez quieres hacer el bootstrap mucho más fácil, sí: volver el repo público por unos segundos puede simplificar el `git clone` inicial.
+
+Pero eso solo te facilita bajar `omni-core`. No reemplaza:
+
+- el bundle de estado
+- el pack de secretos
+- `.env`
+- credenciales
+- sesiones
+- dumps de PM2
+- el estado completo de `/home/ubuntu`
+
+O sea: GitHub público ayuda con el código del instalador. La migración real sigue necesitando `omni capture` y luego `omni restore` o `omni migrate`.
+
 Tu caso correcto es este:
 
 1. abres PowerShell en tu PC
@@ -120,6 +155,27 @@ Eso hace esto:
 - ejecuta `sync`
 - instala el timer diario
 - si antes corriste `omni init --profile full-home`, el manifest ya quedará listo para capturar el home completo manteniendo secretos aparte
+
+## Si después quieres capturar absolutamente todo
+
+Todavía dentro de Ubuntu:
+
+```bash
+cd "$OMNI_DIR"
+omni init --profile full-home
+export OMNI_SECRET_PASSPHRASE='TU_CLAVE_FUERTE'
+omni capture
+```
+
+El preflight de `omni capture` ahora te va a mostrar antes de confirmar:
+
+- perfil activo
+- raíz real de captura
+- tamaño total del estado
+- secretos separados
+- directorios más pesados dentro del scope
+
+Ahí vas a ver explícitamente si entran `.codex` y `melissa-backups`.
 
 ## Paso 6. Verifica que quedó bien
 
