@@ -1,0 +1,6 @@
+# Nova - auto-generated
+# Never commit API keys or session data
+*.secrets
+*.key
+sessions/
+memory/*.enc
