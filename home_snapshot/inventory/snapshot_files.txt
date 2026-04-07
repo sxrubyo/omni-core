@@ -759,8 +759,6 @@ nova-cli/nexus/docker-compose.yml
 nova-cli/nexus/env.example
 nova-cli/nova-cli
 nova-cli/nova.sh
-nova-os/.claude/handoffs/2026-03-26-010939-nova-runtime-integration.md
-nova-os/.claude/handoffs/2026-03-26-181922-nova-discovery-hardening.md
 nova-os/.gitignore
 nova-os/ARCHITECTURE.md
 nova-os/CONTRIBUTING.md

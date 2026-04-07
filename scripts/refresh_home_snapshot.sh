@@ -2,14 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOME_ROOT="${1:-/home/ubuntu}"
-SNAPSHOT_ROOT="$ROOT_DIR/home_snapshot"
-TARGET_ROOT="$SNAPSHOT_ROOT/ubuntu"
-INVENTORY_DIR="$SNAPSHOT_ROOT/inventory"
 
-mkdir -p "$TARGET_ROOT" "$INVENTORY_DIR"
-rm -rf "$TARGET_ROOT"
-mkdir -p "$TARGET_ROOT"
+MODE="safe"
+HOME_ROOT="/home/ubuntu"
+
+PUBLIC_SNAPSHOT_ROOT="$ROOT_DIR/home_snapshot"
+PUBLIC_TARGET_ROOT="$PUBLIC_SNAPSHOT_ROOT/ubuntu"
+PUBLIC_INVENTORY_DIR="$PUBLIC_SNAPSHOT_ROOT/inventory"
+
+PRIVATE_SNAPSHOT_ROOT="$ROOT_DIR/home_private_snapshot"
+PRIVATE_ARCHIVE_DIR="$PRIVATE_SNAPSHOT_ROOT/archives"
+PRIVATE_INVENTORY_DIR="$PRIVATE_SNAPSHOT_ROOT/inventory"
+PRIVATE_CHUNK_SIZE="${HOME_PRIVATE_SNAPSHOT_CHUNK_SIZE:-95m}"
 
 ALLOWLIST_DIRS=(
   ".agents"
@@ -51,25 +55,28 @@ ALLOWLIST_FILES=(
 TOP_LEVEL_OMIT_REASONS=(
   ".android:tool-cache"
   ".appium:tool-cache"
+  ".appium.env:env-file"
   ".cache:cache"
-  ".claude:session-data"
+  ".claude:private-runtime-layer"
   ".claude-flow:runtime"
+  ".claude.json:session-config"
   ".config:user-config-may-contain-secrets"
   ".copilot:session-data"
   ".docker:cache"
   ".env.nova:secret"
-  ".gemini:session-data"
+  ".gemini:private-runtime-layer"
   ".git-credentials:secret"
   ".local:cache"
-  ".melissa:runtime-state"
-  ".n8n:runtime-state-and-secrets"
+  ".melissa:private-runtime-layer"
+  ".n8n:private-runtime-layer"
   ".npm:cache"
   ".npm-global:global-packages"
+  ".npmrc:secret"
   ".ollama:model-cache"
   ".openclaw:runtime-state"
   ".pki:certificates"
   ".playwright-cli:cache"
-  ".pm2:runtime-state"
+  ".pm2:private-runtime-layer"
   ".pytest_cache:cache"
   ".ssh:secret"
   ".swarm:runtime-state"
@@ -100,6 +107,11 @@ RSYNC_EXCLUDES=(
   "--exclude=.pytest_cache/"
   "--exclude=.cache/"
   "--exclude=.coverage"
+  "--exclude=.claude/"
+  "--exclude=.codex/"
+  "--exclude=.gemini/"
+  "--exclude=.n8n/"
+  "--exclude=.pm2/"
   "--exclude=.env"
   "--exclude=.env.*"
   "--exclude=*.env"
@@ -123,22 +135,132 @@ RSYNC_EXCLUDES=(
   "--exclude=tmp/"
 )
 
+PRIVATE_ARCHIVE_TARGETS=(
+  ".claude"
+  ".codex"
+  ".gemini"
+  ".melissa"
+  ".n8n"
+  ".nova"
+  ".pm2"
+  "Openclaw"
+  "Workflows-n8n"
+  "melissa"
+  "melissa-instances"
+  "nova-os"
+  "openclaw-official"
+  "tv-bridge"
+  "whatsapp-bridge"
+  "xus-core"
+  "xus-https"
+  "xus-tv-bridge"
+)
+
+PRIVATE_OMIT_REASONS=(
+  ".ssh:never-commit-ssh-material"
+  ".git-credentials:never-commit-credentials"
+  ".env.nova:never-commit-env"
+  ".appium.env:never-commit-env"
+  ".npmrc:may-contain-token"
+  "melissa-backups:historical-backups-too-large"
+  "omni-core:git-repo-restored-separately"
+  "node_modules:dependency-cache"
+  ".cache:cache"
+  ".npm:cache"
+  ".npm-global:global-packages"
+  "android-sdk:tool-cache"
+  "go:tool-cache"
+  "opencode_env:venv"
+  "backups-test:backup"
+)
+
+PRIVATE_TAR_EXCLUDES=(
+  "--exclude=.git"
+  "--exclude=node_modules"
+  "--exclude=.venv"
+  "--exclude=venv"
+  "--exclude=__pycache__"
+  "--exclude=.pytest_cache"
+  "--exclude=.cache"
+  "--exclude=.npm"
+  "--exclude=.npm-global"
+  "--exclude=.ssh"
+  "--exclude=.git-credentials"
+  "--exclude=.env"
+  "--exclude=.env.*"
+  "--exclude=*.env"
+  "--exclude=.npmrc"
+  "--exclude=melissa-backups"
+  "--exclude=backups"
+  "--exclude=backup*"
+  "--exclude=.codex/vendor"
+  "--exclude=.codex/cache"
+  "--exclude=.codex/.tmp"
+  "--exclude=.gemini/tmp"
+  "--exclude=.claude/cache"
+)
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/refresh_home_snapshot.sh [--mode safe|private] [HOME_ROOT]
+
+Modes:
+  safe     Refresh the public GitHub-safe snapshot only.
+  private  Refresh the public snapshot and build encrypted private overlays.
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      --mode)
+        MODE="${2:-}"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      --*)
+        printf 'Unknown option: %s\n' "$1" >&2
+        exit 1
+        ;;
+      *)
+        HOME_ROOT="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$MODE" != "safe" && "$MODE" != "private" ]]; then
+    printf 'Unsupported mode: %s\n' "$MODE" >&2
+    exit 1
+  fi
+}
+
+reset_dir() {
+  local path="$1"
+  rm -rf "$path"
+  mkdir -p "$path"
+}
+
 top_level_inventory() {
-  find "$HOME_ROOT" -mindepth 1 -maxdepth 1 -printf '%y\t%f\n' | sort > "$INVENTORY_DIR/top_level_entries.tsv"
-  du -sh "$HOME_ROOT"/* "$HOME_ROOT"/.[!.]* 2>/dev/null | sort -h > "$INVENTORY_DIR/top_level_sizes.txt" || true
+  find "$HOME_ROOT" -mindepth 1 -maxdepth 1 -printf '%y\t%f\n' | sort > "$PUBLIC_INVENTORY_DIR/top_level_entries.tsv"
+  du -sh "$HOME_ROOT"/* "$HOME_ROOT"/.[!.]* 2>/dev/null | sort -h > "$PUBLIC_INVENTORY_DIR/top_level_sizes.txt" || true
 }
 
 write_omissions() {
-  : > "$INVENTORY_DIR/omitted_top_level.tsv"
+  : > "$PUBLIC_INVENTORY_DIR/omitted_top_level.tsv"
   for item in "${TOP_LEVEL_OMIT_REASONS[@]}"; do
-    printf '%s\t%s\n' "${item%%:*}" "${item#*:}" >> "$INVENTORY_DIR/omitted_top_level.tsv"
+    printf '%s\t%s\n' "${item%%:*}" "${item#*:}" >> "$PUBLIC_INVENTORY_DIR/omitted_top_level.tsv"
   done
 }
 
 copy_dir() {
   local name="$1"
   local src="$HOME_ROOT/$name"
-  local dest="$TARGET_ROOT/$name"
+  local dest="$PUBLIC_TARGET_ROOT/$name"
 
   if [[ ! -e "$src" ]]; then
     return 0
@@ -147,7 +269,6 @@ copy_dir() {
   mkdir -p "$dest"
 
   if [[ "$name" == ".codex" ]]; then
-    mkdir -p "$dest"
     for entry in AGENTS.override.md config.toml instructions.md version.json rules skills superpowers; do
       if [[ -e "$src/$entry" ]]; then
         rsync -a "$src/$entry" "$dest/"
@@ -157,7 +278,6 @@ copy_dir() {
   fi
 
   if [[ "$name" == ".nova" ]]; then
-    mkdir -p "$dest"
     for entry in .gitignore nova nova.py profiles.json protected.json shell_setup.sh; do
       if [[ -e "$src/$entry" ]]; then
         rsync -a "$src/$entry" "$dest/"
@@ -179,15 +299,15 @@ copy_dir() {
 copy_file() {
   local name="$1"
   local src="$HOME_ROOT/$name"
-  local dest="$TARGET_ROOT/$name"
+  local dest="$PUBLIC_TARGET_ROOT/$name"
 
   if [[ -f "$src" ]]; then
     install -D -m 0644 "$src" "$dest"
   fi
 }
 
-write_manifest() {
-  cat > "$INVENTORY_DIR/snapshot_scope.txt" <<EOF
+write_public_manifest() {
+  cat > "$PUBLIC_INVENTORY_DIR/snapshot_scope.txt" <<EOF
 GitHub-safe fallback snapshot generated from: $HOME_ROOT
 
 Included top-level directories:
@@ -201,20 +321,136 @@ $(printf '%s\n' "${RSYNC_EXCLUDES[@]}")
 EOF
 }
 
-top_level_inventory
-write_omissions
+refresh_public_snapshot() {
+  mkdir -p "$PUBLIC_SNAPSHOT_ROOT" "$PUBLIC_INVENTORY_DIR"
+  reset_dir "$PUBLIC_TARGET_ROOT"
+  top_level_inventory
+  write_omissions
 
-for dir_name in "${ALLOWLIST_DIRS[@]}"; do
-  copy_dir "$dir_name"
-done
+  for dir_name in "${ALLOWLIST_DIRS[@]}"; do
+    copy_dir "$dir_name"
+  done
 
-for file_name in "${ALLOWLIST_FILES[@]}"; do
-  copy_file "$file_name"
-done
+  for file_name in "${ALLOWLIST_FILES[@]}"; do
+    copy_file "$file_name"
+  done
 
-write_manifest
+  write_public_manifest
+  du -sh "$PUBLIC_TARGET_ROOT" > "$PUBLIC_INVENTORY_DIR/snapshot_size.txt" || true
+  find "$PUBLIC_TARGET_ROOT" -type f | sed "s#^$PUBLIC_TARGET_ROOT/##" | sort > "$PUBLIC_INVENTORY_DIR/snapshot_files.txt"
+}
 
-du -sh "$TARGET_ROOT" > "$INVENTORY_DIR/snapshot_size.txt" || true
-find "$TARGET_ROOT" -type f | sed "s#^$TARGET_ROOT/##" | sort > "$INVENTORY_DIR/snapshot_files.txt"
+slugify_target() {
+  local target="$1"
+  target="${target#.}"
+  target="${target//\//__}"
+  target="${target// /_}"
+  if [[ "$1" == .* ]]; then
+    printf 'dot_%s' "$target"
+  else
+    printf '%s' "$target"
+  fi
+}
 
-printf 'Snapshot refreshed at %s\n' "$TARGET_ROOT"
+ensure_private_passphrase_file() {
+  if [[ -n "${HOME_PRIVATE_SNAPSHOT_PASSPHRASE_FILE:-}" ]]; then
+    printf '%s\n' "$HOME_PRIVATE_SNAPSHOT_PASSPHRASE_FILE"
+    return 0
+  fi
+
+  local passphrase_value="${HOME_PRIVATE_SNAPSHOT_PASSPHRASE:-${OMNI_SECRET_PASSPHRASE:-}}"
+  local passphrase_file="$ROOT_DIR/backups/home_private_snapshot.passphrase"
+  mkdir -p "$(dirname "$passphrase_file")"
+
+  if [[ -n "$passphrase_value" ]]; then
+    umask 077
+    printf '%s' "$passphrase_value" > "$passphrase_file"
+    printf '%s\n' "$passphrase_file"
+    return 0
+  fi
+
+  if [[ ! -f "$passphrase_file" ]]; then
+    umask 077
+    openssl rand -hex 32 > "$passphrase_file"
+  fi
+  printf '%s\n' "$passphrase_file"
+}
+
+write_private_inventory() {
+  : > "$PRIVATE_INVENTORY_DIR/omitted_targets.tsv"
+  for item in "${PRIVATE_OMIT_REASONS[@]}"; do
+    printf '%s\t%s\n' "${item%%:*}" "${item#*:}" >> "$PRIVATE_INVENTORY_DIR/omitted_targets.tsv"
+  done
+
+  cat > "$PRIVATE_INVENTORY_DIR/README.txt" <<EOF
+Private encrypted overlay generated from: $HOME_ROOT
+
+Archives live in:
+  $PRIVATE_ARCHIVE_DIR
+
+Restore with:
+  ./scripts/restore_home_private_snapshot.sh /home/ubuntu
+EOF
+}
+
+archive_target() {
+  local name="$1"
+  local src="$HOME_ROOT/$name"
+  local slug
+  local prefix
+  local passphrase_file="$2"
+  local target_type="dir"
+  local part_count=0
+
+  if [[ ! -e "$src" ]]; then
+    return 0
+  fi
+
+  if [[ -f "$src" ]]; then
+    target_type="file"
+  fi
+
+  slug="$(slugify_target "$name")"
+  prefix="$PRIVATE_ARCHIVE_DIR/$slug.tar.gz.enc.part-"
+  rm -f "$prefix"*
+
+  tar -czf - -C "$HOME_ROOT" "${PRIVATE_TAR_EXCLUDES[@]}" "$name" \
+    | openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$passphrase_file" \
+    | split -b "$PRIVATE_CHUNK_SIZE" - "$prefix"
+
+  while IFS= read -r _part; do
+    part_count=$((part_count + 1))
+  done < <(find "$PRIVATE_ARCHIVE_DIR" -maxdepth 1 -type f -name "$(basename "$prefix")*" | sort)
+
+  printf '%s\t%s\t%s\t%d\n' "$name" "$slug" "$target_type" "$part_count" >> "$PRIVATE_INVENTORY_DIR/archive_manifest.tsv"
+}
+
+refresh_private_snapshot() {
+  local passphrase_file
+  passphrase_file="$(ensure_private_passphrase_file)"
+
+  mkdir -p "$PRIVATE_SNAPSHOT_ROOT" "$PRIVATE_INVENTORY_DIR"
+  reset_dir "$PRIVATE_ARCHIVE_DIR"
+  : > "$PRIVATE_INVENTORY_DIR/archive_manifest.tsv"
+  write_private_inventory
+
+  for name in "${PRIVATE_ARCHIVE_TARGETS[@]}"; do
+    archive_target "$name" "$passphrase_file"
+  done
+
+  find "$PRIVATE_ARCHIVE_DIR" -type f | sed "s#^$PRIVATE_SNAPSHOT_ROOT/##" | sort > "$PRIVATE_INVENTORY_DIR/archive_files.txt"
+  du -sh "$PRIVATE_ARCHIVE_DIR" > "$PRIVATE_INVENTORY_DIR/archive_size.txt" || true
+  printf '%s\n' "$passphrase_file" > "$PRIVATE_INVENTORY_DIR/passphrase_path.txt"
+}
+
+main() {
+  parse_args "$@"
+  refresh_public_snapshot
+  if [[ "$MODE" == "private" ]]; then
+    refresh_private_snapshot
+    printf 'Private snapshot refreshed at %s\n' "$PRIVATE_SNAPSHOT_ROOT"
+  fi
+  printf 'Snapshot refreshed at %s\n' "$PUBLIC_TARGET_ROOT"
+}
+
+main "$@"

@@ -41,6 +41,7 @@
 68K	/home/ubuntu/.claude-flow
 76K	/home/ubuntu/.bash_history
 76K	/home/ubuntu/.pki
+80K	/home/ubuntu/migracion
 84K	/home/ubuntu/.eco-nova
 156K	/home/ubuntu/.docker
 168K	/home/ubuntu/main.py.tmp
@@ -78,5 +79,5 @@
 1.4G	/home/ubuntu/nova-os
 1.5G	/home/ubuntu/.npm-global
 2.9G	/home/ubuntu/.codex
-18G	/home/ubuntu/melissa-backups
-18G	/home/ubuntu/omni-core
+16G	/home/ubuntu/omni-core
+17G	/home/ubuntu/melissa-backups

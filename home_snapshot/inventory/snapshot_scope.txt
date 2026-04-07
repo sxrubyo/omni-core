@@ -44,6 +44,11 @@ Global exclusions inside copied directories:
 --exclude=.pytest_cache/
 --exclude=.cache/
 --exclude=.coverage
+--exclude=.claude/
+--exclude=.codex/
+--exclude=.gemini/
+--exclude=.n8n/
+--exclude=.pm2/
 --exclude=.env
 --exclude=.env.*
 --exclude=*.env
