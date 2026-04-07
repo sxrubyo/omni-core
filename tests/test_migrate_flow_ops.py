@@ -229,6 +229,28 @@ class MigrateFlowOpsTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "warning_vanished")
         self.assertIn("backups/auto-bundles", build_mock.call_args.kwargs["extra_excludes"])
 
+    def test_sync_servers_uses_host_root_when_manifest_profile_is_full_home(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": ["/home/ubuntu/melissa"]}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "system_manifest.json"
+            manifest_path.write_text(
+                '{"profile": "full-home", "host_root": "/home/ubuntu"}',
+                encoding="utf-8",
+            )
+            snapshot_root = Path(tmp) / "state"
+
+            with mock.patch.object(core, "manifest_path", manifest_path), \
+                 mock.patch("omni_core.STATE_DIR", snapshot_root), \
+                 mock.patch.object(core.transfer, "_run_cmd", return_value=(0, "", "")), \
+                 mock.patch("omni_core.build_remote_sync_command", return_value="rsync test") as build_mock:
+                result = core.sync_servers()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(build_mock.call_args[0][1], "/home/ubuntu")
+        self.assertIn("omni-core/backups/auto-bundles", build_mock.call_args.kwargs["extra_excludes"])
+
 
 if __name__ == "__main__":
     unittest.main()

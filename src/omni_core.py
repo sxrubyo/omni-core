@@ -1615,9 +1615,16 @@ class OmniCore:
     def sync_servers(self) -> Dict[str, Any]:
         logger = logging.getLogger("omni.core")
         results: List[Dict[str, Any]] = []
+        manifest: Optional[Dict[str, Any]] = None
 
         if not self.servers:
             return {"success": False, "message": f"No servers configured in {SERVERS_FILE}", "results": results}
+
+        if self.manifest_path.exists():
+            try:
+                manifest = load_manifest(self.manifest_path, str(Path.home()))
+            except Exception as err:
+                logger.warning("Unable to load manifest for sync alignment: %s", err)
 
         snapshot_root = STATE_DIR / "servers"
         snapshot_root.mkdir(parents=True, exist_ok=True)
@@ -1628,7 +1635,7 @@ class OmniCore:
             host = server.get("host")
             port = int(server.get("port", 22))
             protocol = server.get("protocol", "rsync")
-            paths = server.get("paths", [])
+            paths = self.resolve_hydration_paths(server, manifest) or server.get("paths", [])
             excludes = server.get("excludes", [])
 
             if not host or not paths:
@@ -1644,6 +1651,12 @@ class OmniCore:
                 extra_excludes: List[str] = []
                 if Path(str(remote_path)).name == OMNI_HOME.name:
                     extra_excludes.extend(VOLATILE_OMNI_SYNC_EXCLUDES)
+                elif manifest and self.normalize_profile(str(manifest.get("profile", ""))) == FULL_HOME_PROFILE:
+                    host_root = str(manifest.get("host_root") or "").strip()
+                    if host_root and Path(str(remote_path)).resolve() == Path(host_root).resolve():
+                        extra_excludes.extend(
+                            f"{OMNI_HOME.name}/{pattern}" for pattern in VOLATILE_OMNI_SYNC_EXCLUDES
+                        )
                 cmd = build_remote_sync_command(
                     {
                         "user": user,
