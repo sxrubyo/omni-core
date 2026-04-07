@@ -1730,6 +1730,48 @@ class OmniCore:
                 return -1, "", str(exc)
         return self.transfer._run_cmd(cmd)
 
+    def list_remote_directory_entries(self, server: Dict[str, Any], remote_root: str) -> List[str]:
+        user = str(server.get("user", "ubuntu"))
+        host = str(server.get("host", "")).strip()
+        if not host or host == "1.2.3.4":
+            return []
+
+        transport = build_ssh_transport_command(server)
+        remote_cmd = f"find {shlex.quote(remote_root)} -mindepth 1 -maxdepth 1 -printf '%P\\n' | sort"
+        cmd = f"{transport} {shlex.quote(f'{user}@{host}')} {shlex.quote(remote_cmd)}"
+        code, out, err = self.transfer._run_cmd(cmd)
+        if code != 0:
+            logging.getLogger("omni.core").warning(
+                "Unable to enumerate remote directory %s on %s: %s",
+                remote_root,
+                host,
+                (err or out or f"exit {code}").strip(),
+            )
+            return []
+
+        excludes = {str(pattern).strip() for pattern in (server.get("excludes", []) or []) if str(pattern).strip()}
+        entries: List[str] = []
+        for raw_line in (out or "").splitlines():
+            name = raw_line.strip().strip("/")
+            if not name or name in {".", ".."} or name in excludes:
+                continue
+            entries.append(str(Path(remote_root) / name))
+        return entries
+
+    def expand_remote_hydration_paths(
+        self,
+        server: Dict[str, Any],
+        paths: List[str],
+        manifest: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        profile = self.normalize_profile(str((manifest or {}).get("profile", "")))
+        host_root = str((manifest or {}).get("host_root") or Path.home()).strip()
+        if profile == FULL_HOME_PROFILE and host_root and paths == [host_root]:
+            expanded = self.list_remote_directory_entries(server, host_root)
+            if expanded:
+                return expanded
+        return paths
+
     def hydrate_from_remote_servers(self, target_root: str = "/", manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         logger = logging.getLogger("omni.core")
         results: List[Dict[str, Any]] = []
@@ -1744,7 +1786,7 @@ class OmniCore:
             host = str(server.get("host", "")).strip()
             port = int(server.get("port", 22))
             protocol = server.get("protocol", "rsync")
-            paths = self.resolve_hydration_paths(server, manifest)
+            paths = self.expand_remote_hydration_paths(server, self.resolve_hydration_paths(server, manifest), manifest)
             excludes = server.get("excludes", [])
 
             if not host or host == "1.2.3.4" or not paths:

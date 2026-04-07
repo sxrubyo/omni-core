@@ -130,15 +130,19 @@ class MigrateFlowOpsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             host_root = str(Path(tmp) / "source-home")
             target_root = str(Path(tmp) / "restore")
+            expanded = [f"{host_root}/melissa", f"{host_root}/nova-os"]
             with mock.patch("omni_core.build_remote_sync_command", return_value="echo ok") as build_mock, \
+                 mock.patch.object(core, "list_remote_directory_entries", return_value=expanded) as list_mock, \
                  mock.patch.object(core, "_run_transfer_cmd_visible", return_value=(0, "", "")):
                 result = core.hydrate_from_remote_servers(
                     target_root=target_root,
                     manifest={"profile": "full-home", "host_root": host_root},
                 )
 
-        build_mock.assert_called_once()
-        self.assertEqual(build_mock.call_args[0][1], host_root)
+        list_mock.assert_called_once_with(core.servers[0], host_root)
+        self.assertEqual(build_mock.call_count, 2)
+        self.assertEqual(build_mock.call_args_list[0][0][1], expanded[0])
+        self.assertEqual(build_mock.call_args_list[1][0][1], expanded[1])
         self.assertEqual(result["results"][0]["status"], "empty_import")
 
     def test_hydrate_from_remote_servers_skips_remote_omni_home_target(self):
