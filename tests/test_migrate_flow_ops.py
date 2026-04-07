@@ -14,6 +14,23 @@ from omni_core import OmniCore  # noqa: E402
 
 
 class MigrateFlowOpsTests(unittest.TestCase):
+    def test_bundle_search_dirs_include_backup_root(self):
+        core = OmniCore()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = Path(tmp) / "backups"
+            host_dir = backup_dir / "host-bundles"
+            auto_dir = backup_dir / "auto-bundles"
+            host_dir.mkdir(parents=True)
+            auto_dir.mkdir(parents=True)
+            core.bundle_dir = host_dir
+
+            with mock.patch("omni_core.BACKUP_DIR", backup_dir), \
+                 mock.patch.object(core, "auto_backup_dir", return_value=auto_dir):
+                dirs = core.bundle_search_dirs(include_auto=False)
+
+        self.assertEqual(dirs, [host_dir, backup_dir])
+
     def test_migrate_host_cmd_stops_when_restore_fails(self):
         core = OmniCore()
 
@@ -130,7 +147,10 @@ class MigrateFlowOpsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             host_root = str(Path(tmp) / "source-home")
             target_root = str(Path(tmp) / "restore")
-            expanded = [f"{host_root}/melissa", f"{host_root}/nova-os"]
+            expanded = [
+                {"path": f"{host_root}/melissa", "kind": "dir"},
+                {"path": f"{host_root}/nova-os", "kind": "dir"},
+            ]
             with mock.patch("omni_core.build_remote_sync_command", return_value="echo ok") as build_mock, \
                  mock.patch.object(core, "list_remote_directory_entries", return_value=expanded) as list_mock, \
                  mock.patch.object(core, "_run_transfer_cmd_visible", return_value=(0, "", "")):
@@ -141,9 +161,37 @@ class MigrateFlowOpsTests(unittest.TestCase):
 
         list_mock.assert_called_once_with(core.servers[0], host_root)
         self.assertEqual(build_mock.call_count, 2)
-        self.assertEqual(build_mock.call_args_list[0][0][1], expanded[0])
-        self.assertEqual(build_mock.call_args_list[1][0][1], expanded[1])
+        self.assertEqual(build_mock.call_args_list[0][0][1], expanded[0]["path"])
+        self.assertEqual(build_mock.call_args_list[1][0][1], expanded[1]["path"])
         self.assertEqual(result["results"][0]["status"], "empty_import")
+
+    def test_hydrate_from_remote_servers_supports_file_entries(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": ["/home/ubuntu"]}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target_root = str(Path(tmp) / "restore")
+            file_entry = [{"path": "/home/ubuntu/.bash_history", "kind": "file"}]
+            restore_root = Path(target_root)
+
+            def fake_transfer(_cmd, _label):
+                file_path = restore_root / "home" / "ubuntu" / ".bash_history"
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text("history", encoding="utf-8")
+                return 0, "", ""
+
+            with mock.patch.object(core, "list_remote_directory_entries", return_value=file_entry), \
+                 mock.patch("omni_core.build_remote_sync_command", return_value="echo ok") as build_mock, \
+                 mock.patch.object(core, "_run_transfer_cmd_visible", side_effect=fake_transfer):
+                result = core.hydrate_from_remote_servers(
+                    target_root=target_root,
+                    manifest={"profile": "full-home", "host_root": "/home/ubuntu"},
+                )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(build_mock.call_args.kwargs["source_kind"], "file")
+        self.assertEqual(result["results"][0]["status"], "ok")
+        self.assertEqual(result["results"][0]["after"]["entries"], 1)
 
     def test_hydrate_from_remote_servers_skips_remote_omni_home_target(self):
         core = OmniCore()

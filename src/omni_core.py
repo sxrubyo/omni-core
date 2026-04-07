@@ -210,6 +210,7 @@ def build_remote_sync_command(
     env: Optional[Dict[str, str]] = None,
     delete: bool = True,
     extra_excludes: Optional[List[str]] = None,
+    source_kind: str = "dir",
 ) -> str:
     user = str(server.get("user", "ubuntu"))
     host = str(server.get("host", "")).strip()
@@ -228,12 +229,15 @@ def build_remote_sync_command(
                 parts.append(option)
             else:
                 parts.extend(["-o", option])
-        parts.extend(["-r", f"{user}@{host}:{remote_path}", str(target_dir)])
+        if source_kind == "dir":
+            parts.append("-r")
+        parts.extend([f"{user}@{host}:{remote_path}", str(target_dir)])
         return " ".join(shlex.quote(part) for part in parts)
 
     exclude_flags = " ".join(f"--exclude {shlex.quote(pattern)}" for pattern in excludes)
     transport = build_ssh_transport_command(server, ssh_dir=ssh_dir, env=env)
-    remote_spec = f"{user}@{host}:{shlex.quote(remote_path.rstrip('/') + '/')}"
+    normalized_remote = remote_path.rstrip("/") + "/" if source_kind == "dir" else remote_path
+    remote_spec = f"{user}@{host}:{shlex.quote(normalized_remote)}"
     delete_flag = " --delete" if delete else ""
     return (
         f"rsync -az{delete_flag} -e {shlex.quote(transport)} {exclude_flags} "
@@ -1457,7 +1461,7 @@ class OmniCore:
                     continue
 
     def bundle_search_dirs(self, *, include_auto: bool = True) -> List[Path]:
-        directories = [self.bundle_dir]
+        directories = [self.bundle_dir, BACKUP_DIR]
         if include_auto:
             directories.append(self.auto_backup_dir())
         unique: List[Path] = []
@@ -1730,14 +1734,14 @@ class OmniCore:
                 return -1, "", str(exc)
         return self.transfer._run_cmd(cmd)
 
-    def list_remote_directory_entries(self, server: Dict[str, Any], remote_root: str) -> List[str]:
+    def list_remote_directory_entries(self, server: Dict[str, Any], remote_root: str) -> List[Dict[str, str]]:
         user = str(server.get("user", "ubuntu"))
         host = str(server.get("host", "")).strip()
         if not host or host == "1.2.3.4":
             return []
 
         transport = build_ssh_transport_command(server)
-        remote_cmd = f"find {shlex.quote(remote_root)} -mindepth 1 -maxdepth 1 -printf '%P\\n' | sort"
+        remote_cmd = f"find {shlex.quote(remote_root)} -mindepth 1 -maxdepth 1 -printf '%y\\t%P\\n' | sort"
         cmd = f"{transport} {shlex.quote(f'{user}@{host}')} {shlex.quote(remote_cmd)}"
         code, out, err = self.transfer._run_cmd(cmd)
         if code != 0:
@@ -1750,12 +1754,22 @@ class OmniCore:
             return []
 
         excludes = {str(pattern).strip() for pattern in (server.get("excludes", []) or []) if str(pattern).strip()}
-        entries: List[str] = []
+        entries: List[Dict[str, str]] = []
         for raw_line in (out or "").splitlines():
-            name = raw_line.strip().strip("/")
+            raw = raw_line.strip()
+            if not raw:
+                continue
+            if "\t" in raw:
+                type_code, name = raw.split("\t", 1)
+            else:
+                type_code, name = "d", raw
+            name = name.strip().strip("/")
             if not name or name in {".", ".."} or name in excludes:
                 continue
-            entries.append(str(Path(remote_root) / name))
+            entries.append({
+                "path": str(Path(remote_root) / name),
+                "kind": "dir" if type_code == "d" else "file",
+            })
         return entries
 
     def expand_remote_hydration_paths(
@@ -1763,14 +1777,14 @@ class OmniCore:
         server: Dict[str, Any],
         paths: List[str],
         manifest: Optional[Dict[str, Any]] = None,
-    ) -> List[str]:
+    ) -> List[Dict[str, str]]:
         profile = self.normalize_profile(str((manifest or {}).get("profile", "")))
         host_root = str((manifest or {}).get("host_root") or Path.home()).strip()
         if profile == FULL_HOME_PROFILE and host_root and paths == [host_root]:
             expanded = self.list_remote_directory_entries(server, host_root)
             if expanded:
                 return expanded
-        return paths
+        return [{"path": path, "kind": "dir"} for path in paths]
 
     def hydrate_from_remote_servers(self, target_root: str = "/", manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         logger = logging.getLogger("omni.core")
@@ -1793,7 +1807,11 @@ class OmniCore:
                 results.append({"server": name, "success": False, "error": "Missing host or paths"})
                 continue
 
-            for remote_path in paths:
+            for entry in paths:
+                remote_path = str(entry.get("path", "")).strip()
+                source_kind = str(entry.get("kind", "dir")).strip() or "dir"
+                if not remote_path:
+                    continue
                 destination = root / remote_path.lstrip("/")
                 extra_excludes: List[str] = []
                 try:
@@ -1815,7 +1833,8 @@ class OmniCore:
                 except ValueError:
                     pass
                 before_snapshot = self._snapshot_local_path(destination)
-                destination.mkdir(parents=True, exist_ok=True)
+                sync_target = destination if source_kind == "dir" else destination.parent
+                sync_target.mkdir(parents=True, exist_ok=True)
                 cmd = build_remote_sync_command(
                     {
                         "user": user,
@@ -1827,9 +1846,10 @@ class OmniCore:
                         "ssh_options": server.get("ssh_options", []),
                     },
                     remote_path,
-                    destination,
+                    sync_target,
                     delete=False,
                     extra_excludes=extra_excludes,
+                    source_kind=source_kind,
                 )
                 logger.info("Hydrating %s:%s into %s", name, remote_path, destination)
                 code, out, err = self._run_transfer_cmd_visible(
@@ -1844,7 +1864,6 @@ class OmniCore:
                 empty_import = (
                     code == 0
                     and before_snapshot.get("entries", 0) == 0
-                    and after_snapshot.get("kind") == "dir"
                     and after_snapshot.get("entries", 0) == 0
                 )
                 if empty_import:

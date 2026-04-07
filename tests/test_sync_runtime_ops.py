@@ -151,6 +151,33 @@ class SyncRuntimeOpsTests(unittest.TestCase):
 
             self.assertIn("--exclude omni-core", command)
 
+    def test_build_remote_sync_command_supports_file_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ssh_dir = Path(tmp) / ".ssh"
+            ssh_dir.mkdir()
+            private_key = ssh_dir / "n8n_nova"
+            private_key.write_text("PRIVATE", encoding="utf-8")
+            target_dir = Path(tmp) / "restore-parent"
+
+            command = build_remote_sync_command(
+                {
+                    "user": "ubuntu",
+                    "host": "172.31.34.176",
+                    "port": 22,
+                    "protocol": "rsync",
+                    "excludes": [],
+                },
+                "/home/ubuntu/.bash_history",
+                target_dir,
+                ssh_dir=ssh_dir,
+                delete=False,
+                source_kind="file",
+            )
+
+            self.assertIn("ubuntu@172.31.34.176:", command)
+            self.assertIn("/home/ubuntu/.bash_history", command)
+            self.assertNotIn("/home/ubuntu/.bash_history/", command)
+
     def test_resolve_latest_bundle_across_dirs_falls_back_to_auto_bundles(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
