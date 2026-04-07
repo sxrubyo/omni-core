@@ -60,10 +60,12 @@ from host_inventory import (
     DEFAULT_PROFILE,
     FULL_HOME_PROFILE,
     build_default_manifest,
+    discover_local_runtime_paths,
     ensure_manifest,
     expand_path,
     human_size,
     load_manifest,
+    merge_manifest_local_runtime_paths,
     save_manifest,
     scan_home,
 )
@@ -490,6 +492,7 @@ ALIASES = {
     "m": "monitor", "cfg": "config", "v": "version", "st": "stats",
     "proc": "processes", "repo": "repos", "up": "update", "cl": "clean",
     "i": "init",
+    "rai": "recover-apps-ips",
     "tr": "transfer",
     "ex": "examples",
     "pb": "examples",
@@ -2882,6 +2885,7 @@ class OmniCore:
         bullet("omni capture   - Build a full recovery pack from the active profile", C.GRN)
         bullet("omni restore   - Restore from latest bundle + secrets", C.GRN)
         bullet("omni migrate   - Rebuild this host end to end", C.GRN)
+        bullet("omni recover-apps-ips - Reinstall apps/runtime from an already copied home", C.GRN)
         bullet("omni commands  - Show the full Omni command surface", C.GRN)
         nl()
 
@@ -3366,6 +3370,7 @@ class OmniCore:
         auto_backup: bool = True,
         before_services=None,
         allow_missing_bundles: bool = False,
+        recover_apps_ips: bool = False,
     ):
         print_logo(compact=True)
         section("Restore Host")
@@ -3381,6 +3386,9 @@ class OmniCore:
         effective_manifest = merge_manifest_runtime_inventory(manifest, runtime_inventory)
         bootstrap_only = False
         hydration_result = None
+        local_runtime = discover_local_runtime_paths(str(manifest.get("host_root") or Path.home()))
+        if recover_apps_ips or local_runtime.get("ready"):
+            effective_manifest = merge_manifest_local_runtime_paths(effective_manifest, local_runtime)
 
         if not resolved_bundle or not resolved_secrets:
             if not allow_missing_bundles:
@@ -3398,7 +3406,23 @@ class OmniCore:
             return {"success": False, "reason": "cancelled"}
 
         if bootstrap_only:
-            if self.has_ready_remote_source(manifest):
+            if recover_apps_ips:
+                info("Recover apps & IPs activo: se omite hidratación remota y se usará el contenido local existente.")
+                hydration_result = {
+                    "success": True,
+                    "source": "local_recover_apps_ips",
+                    "message": "Using local home content only for app/package recovery and IP rewrite.",
+                    "results": [],
+                }
+            elif local_runtime.get("ready"):
+                info("Contenido local detectado en /home/ubuntu: se omite hidratación remota y se usará el home ya copiado.")
+                hydration_result = {
+                    "success": True,
+                    "source": "local_home",
+                    "message": "Using existing local home content.",
+                    "results": [],
+                }
+            elif self.has_ready_remote_source(manifest):
                 hydration_result = self.hydrate_from_remote_servers(target_root=target_root, manifest=manifest)
                 if hydration_result.get("success"):
                     ok(hydration_result.get("message", "Remote content imported"))
@@ -3463,6 +3487,7 @@ class OmniCore:
             "used_bundles": bool(resolved_bundle and resolved_secrets),
             "runtime_inventory": runtime_inventory,
             "hydration_result": hydration_result,
+            "local_runtime": local_runtime,
         }
 
     def detect_ip_cmd(self):
@@ -3552,6 +3577,7 @@ class OmniCore:
         on_calendar: str = "daily",
         apply_rewrite: bool = True,
         profile: str = "",
+        recover_apps_ips: bool = False,
     ):
         print_logo(compact=True)
         section("Migrate Host")
@@ -3603,6 +3629,7 @@ class OmniCore:
             auto_backup=False,
             before_services=before_services_hook,
             allow_missing_bundles=True,
+            recover_apps_ips=recover_apps_ips,
         )
         if not restore_result or not restore_result.get("success"):
             return
@@ -4189,6 +4216,7 @@ def main():
     parser.add_argument("--apply", action="store_true", help="Apply changes for rewrite-style commands")
     parser.add_argument("--powershell", "--p", "-p", action="store_true", help="Render PowerShell-oriented output where supported")
     parser.add_argument("--skip-rewrite", action="store_true", help="Skip automatic host reference rewrite during migrate")
+    parser.add_argument("--recover-apps-ips", action="store_true", help="Do not restore or hydrate folders; use existing local home content to recover apps, packages and IP rewrites")
     parser.add_argument("--dest", type=str, default="", help="Remote destination for bridge send")
 
     args, remaining = parser.parse_known_args()
@@ -4292,6 +4320,22 @@ def main():
                 on_calendar=args.on_calendar,
                 apply_rewrite=not args.skip_rewrite,
                 profile=args.profile,
+                recover_apps_ips=args.recover_apps_ips,
+            )
+        elif action == "recover-apps-ips":
+            core.migrate_host_cmd(
+                manifest_path=args.manifest,
+                home_root=args.home_root,
+                bundle_path="",
+                secrets_path="",
+                target_root=args.target_root,
+                passphrase_env=args.passphrase_env,
+                accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
+                install_timer=args.yes or args.accept_all,
+                on_calendar=args.on_calendar,
+                apply_rewrite=not args.skip_rewrite,
+                profile=args.profile,
+                recover_apps_ips=True,
             )
         elif action == "detect-ip":
             core.detect_ip_cmd()

@@ -7,6 +7,7 @@ USE_COMPOSE=false
 AUTO_SYNC=false
 USE_PM2=false
 INSTALL_TIMER=false
+RECOVER_APPS_IPS=false
 TIMER_ON_CALENDAR="${OMNI_TIMER_ON_CALENDAR:-daily}"
 PROFILE="${OMNI_PROFILE:-full-home}"
 
@@ -16,6 +17,7 @@ for arg in "$@"; do
     --sync) AUTO_SYNC=true ;;
     --pm2) USE_PM2=true ;;
     --timer) INSTALL_TIMER=true ;;
+    --recover-apps-ips) RECOVER_APPS_IPS=true ;;
     --on-calendar=*) TIMER_ON_CALENDAR="${arg#*=}" ;;
   esac
 done
@@ -78,7 +80,11 @@ if $USE_PM2; then
 fi
 
 if $USE_COMPOSE; then
-  "$ROOT_DIR/bin/omni" migrate --accept-all --skip-rewrite --profile "$PROFILE"
+  MIGRATE_ARGS=(migrate --accept-all --profile "$PROFILE")
+  if $RECOVER_APPS_IPS; then
+    MIGRATE_ARGS+=(--recover-apps-ips)
+  fi
+  "$ROOT_DIR/bin/omni" "${MIGRATE_ARGS[@]}"
 fi
 
 if $INSTALL_TIMER; then
@@ -112,5 +118,6 @@ Comandos:
   omni reconcile
   omni timer-install
   omni sync
-  omni migrate --accept-all --skip-rewrite
+  omni migrate --accept-all
+  omni migrate --accept-all --recover-apps-ips
 EOF

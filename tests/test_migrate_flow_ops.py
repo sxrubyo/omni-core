@@ -125,6 +125,7 @@ class MigrateFlowOpsTests(unittest.TestCase):
                  mock.patch.object(core, "resolve_manifest", return_value=(root / "manifest.json", {"profile": "full-home"})), \
                  mock.patch.object(core, "read_passphrase", return_value=""), \
                  mock.patch.object(core, "confirm_step", return_value=True), \
+                 mock.patch("omni_core.discover_local_runtime_paths", return_value={"ready": False, "install_targets": [], "compose_projects": [], "pm2_ecosystems": [], "detected_projects": [], "runtime_markers": []}), \
                  mock.patch.object(core, "hydrate_from_remote_servers", return_value={"success": True, "results": [{"success": True}]} ) as hydrate_mock, \
                  mock.patch("omni_core.resolve_installed_inventory_across_dirs", return_value=None), \
                  mock.patch("omni_core.reconcile_host", return_value={"steps": []}) as reconcile_mock:
@@ -139,6 +140,53 @@ class MigrateFlowOpsTests(unittest.TestCase):
         hydrate_mock.assert_called_once()
         reconcile_mock.assert_called_once()
         self.assertEqual(result["hydration_result"]["results"][0]["success"], True)
+
+    def test_restore_host_cmd_recover_apps_ips_uses_local_home_state_without_hydration(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host_dir = root / "host-bundles"
+            auto_dir = root / "auto-bundles"
+            host_dir.mkdir()
+            auto_dir.mkdir()
+            core.bundle_dir = host_dir
+
+            local_discovery = {
+                "ready": True,
+                "install_targets": ["/home/ubuntu/xus-core"],
+                "compose_projects": ["/home/ubuntu/xus-https"],
+                "pm2_ecosystems": ["/home/ubuntu/whatsapp-bridge/ecosystem.config.cjs"],
+                "detected_projects": ["/home/ubuntu/xus-core"],
+                "runtime_markers": ["/home/ubuntu/.n8n"],
+            }
+
+            with mock.patch.object(core, "auto_backup_dir", return_value=auto_dir), \
+                 mock.patch.object(core, "init_workspace"), \
+                 mock.patch.object(core, "resolve_manifest", return_value=(root / "manifest.json", {"profile": "full-home", "host_root": "/home/ubuntu"})), \
+                 mock.patch.object(core, "read_passphrase", return_value=""), \
+                 mock.patch.object(core, "confirm_step", return_value=True), \
+                 mock.patch("omni_core.resolve_installed_inventory_across_dirs", return_value=None), \
+                 mock.patch("omni_core.discover_local_runtime_paths", return_value=local_discovery), \
+                 mock.patch.object(core, "hydrate_from_remote_servers") as hydrate_mock, \
+                 mock.patch("omni_core.reconcile_host", return_value={"steps": []}) as reconcile_mock:
+                result = core.restore_host_cmd(
+                    accept_all=True,
+                    show_summary=False,
+                    auto_backup=False,
+                    allow_missing_bundles=True,
+                    recover_apps_ips=True,
+                )
+
+        hydrate_mock.assert_not_called()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["hydration_result"]["source"], "local_recover_apps_ips")
+        call_args, _ = reconcile_mock.call_args
+        merged_manifest = call_args[0]
+        self.assertIn("/home/ubuntu/xus-core", merged_manifest["install_targets"])
+        self.assertIn("/home/ubuntu/xus-https", merged_manifest["compose_projects"])
+        self.assertIn("/home/ubuntu/whatsapp-bridge/ecosystem.config.cjs", merged_manifest["pm2_ecosystems"])
 
     def test_hydrate_from_remote_servers_uses_host_root_for_full_home_profile(self):
         core = OmniCore()
