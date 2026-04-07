@@ -115,6 +115,11 @@ SYSTEM_MANIFEST_FILE = Path(
 AUTO_BACKUP_ON_CHANGE = os.environ.get("OMNI_AUTO_BACKUP_ON_CHANGE", "1").strip().lower() in {"1", "true", "yes", "on"}
 AUTO_BACKUP_KEEP = max(1, int(os.environ.get("OMNI_AUTO_BACKUP_KEEP", "5")))
 WATCH_BACKUP_COOLDOWN = max(30, int(os.environ.get("OMNI_WATCH_BACKUP_COOLDOWN", "600")))
+VOLATILE_OMNI_SYNC_EXCLUDES = [
+    "data/servers",
+    "backups/auto-bundles",
+    "logs/omni.log",
+]
 
 
 def load_env_file(env_path: Path) -> None:
@@ -286,6 +291,13 @@ def resolve_installed_inventory_across_dirs(
         if payload:
             return payload
     return None
+
+
+def is_rsync_vanished_warning(code: int, output: str, error: str) -> bool:
+    if code != 24:
+        return False
+    combined = f"{output}\n{error}".lower()
+    return "file has vanished" in combined or "files vanished" in combined
 
 
 def _is_ip_literal(value: str) -> bool:
@@ -1629,6 +1641,9 @@ class OmniCore:
             for remote_path in paths:
                 target_dir = server_root / path_to_snapshot_name(remote_path)
                 target_dir.mkdir(parents=True, exist_ok=True)
+                extra_excludes: List[str] = []
+                if Path(str(remote_path)).name == OMNI_HOME.name:
+                    extra_excludes.extend(VOLATILE_OMNI_SYNC_EXCLUDES)
                 cmd = build_remote_sync_command(
                     {
                         "user": user,
@@ -1642,22 +1657,30 @@ class OmniCore:
                     remote_path,
                     target_dir,
                     delete=True,
+                    extra_excludes=extra_excludes,
                 )
 
                 logger.info("Syncing %s:%s", name, remote_path)
                 code, out, err = self.transfer._run_cmd(cmd)
-                error = err if code != 0 else ""
+                vanished_warning = is_rsync_vanished_warning(code, out, err)
+                error = err if code != 0 and not vanished_warning else ""
                 if code != 0 and "Permission denied (publickey)" in error:
                     hint = "Configure `identity_file` in config/servers.json or leave a single private key in ~/.ssh."
                     error = f"{error}\n{hint}"
+                status = "ok"
+                if vanished_warning:
+                    status = "warning_vanished"
+                elif code != 0:
+                    status = "failed"
                 results.append({
                     "server": name,
                     "path": remote_path,
                     "protocol": protocol,
-                    "success": code == 0,
+                    "success": code == 0 or vanished_warning,
                     "target": str(target_dir),
                     "error": error,
-                    "output": out if code == 0 else "",
+                    "output": out if code == 0 or vanished_warning else "",
+                    "status": status,
                 })
 
         ok_count = sum(1 for item in results if item.get("success"))

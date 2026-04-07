@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 from omni_core import (  # noqa: E402
     build_remote_sync_command,
     discover_ssh_identity_candidates,
+    is_rsync_vanished_warning,
     resolve_latest_bundle_across_dirs,
     resolve_server_identity_file,
 )
@@ -191,6 +192,11 @@ class SyncRuntimeOpsTests(unittest.TestCase):
             resolved = resolve_latest_bundle_across_dirs([host_dir, auto_dir], "", "state_bundle")
 
             self.assertEqual(resolved, auto_bundle)
+
+    def test_is_rsync_vanished_warning_matches_code_24(self):
+        self.assertTrue(is_rsync_vanished_warning(24, "", "file has vanished"))
+        self.assertTrue(is_rsync_vanished_warning(24, "some files vanished before they could be transferred", ""))
+        self.assertFalse(is_rsync_vanished_warning(23, "", "file has vanished"))
 
 
 if __name__ == "__main__":

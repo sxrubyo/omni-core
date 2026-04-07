@@ -215,6 +215,20 @@ class MigrateFlowOpsTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["results"][0]["status"], "empty_import")
 
+    def test_sync_servers_treats_rsync_code_24_as_warning(self):
+        core = OmniCore()
+        core.servers = [{"name": "main-ubuntu", "host": "172.31.99.10", "paths": ["/home/ubuntu/omni-core"]}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("omni_core.STATE_DIR", Path(tmp)), \
+                 mock.patch.object(core.transfer, "_run_cmd", return_value=(24, "", "file has vanished")), \
+                 mock.patch("omni_core.build_remote_sync_command", return_value="rsync test") as build_mock:
+                result = core.sync_servers()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["results"][0]["status"], "warning_vanished")
+        self.assertIn("backups/auto-bundles", build_mock.call_args.kwargs["extra_excludes"])
+
 
 if __name__ == "__main__":
     unittest.main()
