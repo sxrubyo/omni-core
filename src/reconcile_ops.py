@@ -30,30 +30,139 @@ def command_exists(name: str) -> bool:
     return code == 0
 
 
+def run_visible_cmd(cmd: str, cwd: str | None = None, label: str = "") -> Tuple[int, str, str]:
+    return run_cmd(cmd, cwd=cwd)
+
+
+def detect_compose_command() -> str:
+    if command_exists("docker"):
+        code, out, err = run_cmd("docker compose version")
+        if code == 0:
+            return "docker compose"
+    if command_exists("docker-compose"):
+        return "docker-compose"
+    return "docker compose"
+
+
+def docker_requires_sudo() -> bool:
+    docker_socket = Path("/var/run/docker.sock")
+    return bool(command_exists("sudo") and docker_socket.exists() and not os.access(docker_socket, os.W_OK))
+
+
+def build_compose_up_command(compose_file: Path) -> str:
+    base = detect_compose_command()
+    prefix = "sudo " if docker_requires_sudo() else ""
+    return f"{prefix}{base} -f {str(compose_file)} up -d --build"
+
+
+def build_compose_down_command(compose_file: Path) -> str:
+    base = detect_compose_command()
+    prefix = "sudo " if docker_requires_sudo() else ""
+    return f"{prefix}{base} -f {str(compose_file)} down --remove-orphans"
+
+
+def ensure_docker_service_running() -> Dict[str, Any]:
+    if not command_exists("docker"):
+        return {"changed": False, "status": "missing"}
+    if not command_exists("systemctl"):
+        return {"changed": False, "status": "skipped"}
+    code, out, err = run_cmd("systemctl is-active docker")
+    if code == 0 and out.strip() == "active":
+        return {"changed": False, "status": "active"}
+    prefix = "sudo " if command_exists("sudo") else ""
+    code, out, err = run_cmd(f"{prefix}systemctl enable --now docker")
+    if code != 0:
+        raise RuntimeError(err or out or "Failed to start docker service")
+    return {"changed": True, "status": "started"}
+
+
+def ensure_supported_node_runtime(target_major: int = 20) -> Dict[str, Any]:
+    if command_exists("node"):
+        code, out, _ = run_cmd("node -v")
+        if code == 0 and out.strip().startswith("v"):
+            try:
+                current_major = int(out.strip().lstrip("v").split(".", 1)[0])
+            except ValueError:
+                current_major = 0
+            if current_major >= target_major:
+                return {"changed": False, "current_major": current_major, "target_major": target_major}
+        else:
+            current_major = 0
+    else:
+        current_major = 0
+
+    if not command_exists("apt-get") or not command_exists("curl"):
+        return {"changed": False, "status": "unsupported", "target_major": target_major}
+
+    prefix = "sudo " if command_exists("sudo") else ""
+    legacy_conflicts: List[str] = []
+    for package in ("libnode-dev", "nodejs-doc", "npm"):
+        code, _, _ = run_cmd(f"dpkg -s {package}")
+        if code == 0:
+            legacy_conflicts.append(package)
+    if legacy_conflicts:
+        code, out, err = run_cmd(
+            f"{prefix}DEBIAN_FRONTEND=noninteractive apt-get remove -y {' '.join(legacy_conflicts)}"
+        )
+        if code != 0:
+            raise RuntimeError(err or out or "Failed to remove legacy node conflicts")
+
+    node_setup_cmd = (
+        f"curl -fsSL https://deb.nodesource.com/setup_{target_major}.x | "
+        + (f"{prefix}-E bash -" if prefix else "bash -")
+    )
+    code, out, err = run_cmd(node_setup_cmd)
+    if code != 0:
+        raise RuntimeError(err or out or "Failed to prepare NodeSource repository")
+    code, out, err = run_cmd(f"{prefix}DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs")
+    if code != 0:
+        raise RuntimeError(err or out or "Failed to install nodejs")
+    return {"changed": True, "current_major": current_major, "target_major": target_major}
+
+
 def install_apt_packages(packages: List[str]) -> Dict[str, Any]:
     requested = [pkg for pkg in packages if pkg]
     if not requested or not command_exists("apt-get"):
-        return {"changed": [], "skipped": requested}
+        return {"changed": [], "skipped": requested, "unavailable": [], "resolved": {}}
     missing: List[str] = []
+    unavailable: List[str] = []
+    resolved: Dict[str, str] = {}
     for package in requested:
         code, _, _ = run_cmd(f"dpkg -s {package}")
         if code != 0:
-            missing.append(package)
+            cache_code, _, _ = run_cmd(f"apt-cache show {package}")
+            if cache_code == 0:
+                missing.append(package)
+                continue
+            if package == "docker-compose-plugin":
+                fallback = "docker-compose"
+                fallback_cache, _, _ = run_cmd(f"apt-cache show {fallback}")
+                if fallback_cache == 0:
+                    missing.append(fallback)
+                    resolved[package] = fallback
+                    continue
+            unavailable.append(package)
     if not missing:
-        return {"changed": [], "skipped": requested}
+        return {"changed": [], "skipped": requested, "unavailable": unavailable, "resolved": resolved}
     run_cmd("sudo apt-get update")
     code, out, err = run_cmd(
         "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y " + " ".join(missing)
     )
     if code != 0:
         raise RuntimeError(err or out or "apt install failed")
-    return {"changed": missing, "skipped": [pkg for pkg in requested if pkg not in missing]}
+    return {
+        "changed": missing,
+        "skipped": [pkg for pkg in requested if pkg not in missing and pkg not in unavailable],
+        "unavailable": unavailable,
+        "resolved": resolved,
+    }
 
 
 def install_npm_global_packages(packages: List[str]) -> Dict[str, Any]:
     requested = [pkg for pkg in packages if pkg]
     if not requested or not command_exists("npm"):
         return {"changed": [], "skipped": requested}
+    ensure_supported_node_runtime()
     missing: List[str] = []
     for package in requested:
         code, _, _ = run_cmd(f"npm list -g {package} --depth=0")
@@ -61,7 +170,13 @@ def install_npm_global_packages(packages: List[str]) -> Dict[str, Any]:
             missing.append(package)
     if not missing:
         return {"changed": [], "skipped": requested}
-    code, out, err = run_cmd("npm install -g " + " ".join(missing))
+    prefix_code, prefix_out, _ = run_cmd("npm config get prefix")
+    install_prefix = prefix_out.strip() if prefix_code == 0 else ""
+    use_sudo = bool(install_prefix.startswith("/usr") and command_exists("sudo"))
+    if install_prefix and not os.access(install_prefix, os.W_OK) and command_exists("sudo"):
+        use_sudo = True
+    command = ("sudo " if use_sudo else "") + "npm install -g " + " ".join(missing)
+    code, out, err = run_cmd(command)
     if code != 0:
         raise RuntimeError(err or out or "npm global install failed")
     return {"changed": missing, "skipped": [pkg for pkg in requested if pkg not in missing]}
@@ -139,6 +254,7 @@ def install_project_dependencies(targets: List[str]) -> List[Dict[str, Any]]:
 
 def start_compose_projects(projects: List[str]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    ensure_docker_service_running()
     for raw_project in projects:
         project = Path(expand_path(raw_project))
         if not project.exists():
@@ -153,9 +269,22 @@ def start_compose_projects(projects: List[str]) -> List[Dict[str, Any]]:
         if not compose_file:
             results.append({"path": str(project), "status": "skipped"})
             continue
-        code, out, err = run_cmd(f"docker compose -f {shlex.quote(str(compose_file))} up -d --build", cwd=str(project))
+        up_command = build_compose_up_command(compose_file)
+        code, out, err = run_visible_cmd(up_command, cwd=str(project), label=f"compose up :: {project.name}")
         if code != 0:
-            raise RuntimeError(err or out or f"docker compose failed for {project}")
+            combined = f"{out}\n{err}".strip()
+            if "ContainerConfig" in combined:
+                down_command = build_compose_down_command(compose_file)
+                down_code, down_out, down_err = run_visible_cmd(
+                    down_command,
+                    cwd=str(project),
+                    label=f"compose down :: {project.name}",
+                )
+                if down_code != 0:
+                    raise RuntimeError(down_err or down_out or f"docker compose recovery failed for {project}")
+                code, out, err = run_visible_cmd(up_command, cwd=str(project), label=f"compose up :: {project.name}")
+            if code != 0:
+                raise RuntimeError(err or out or f"docker compose failed for {project}")
         results.append({"path": str(project), "status": "started", "compose_file": str(compose_file)})
     return results
 

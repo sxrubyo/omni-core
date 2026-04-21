@@ -36,7 +36,10 @@ from bridge_ops import (
     summarize_bundle_pair,
     write_capture_summary,
 )
+from cli_ux_ops import collect_host_snapshot, render_command_header, render_human_error
 from cleanup_ops import build_purge_plan, execute_purge
+from connect_ops import SSHDestination, probe_remote_host, transfer_payload
+from guide_ops import build_guide_entries
 from host_inventory import (
     DEFAULT_PROFILE,
     FULL_HOME_PROFILE,
@@ -53,28 +56,48 @@ from onboarding_ops import build_flow_options, normalize_flow_choice, should_acc
 from platform_ops import detect_platform_info
 from reconcile_ops import install_systemd_service, install_systemd_timer, reconcile_host
 from watch_ops import capture_watch_snapshot, load_watch_snapshot, save_watch_snapshot, summarize_snapshot_diff
+from runtime_inventory_ops import load_installed_inventory
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
-OMNI_HOME = Path(os.environ.get("OMNI_HOME", APP_DIR)).resolve()
-CONFIG_DIR = Path(os.environ.get("OMNI_CONFIG_DIR", OMNI_HOME / "config")).resolve()
-STATE_DIR = Path(os.environ.get("OMNI_STATE_DIR", OMNI_HOME / "data")).resolve()
-BACKUP_DIR = Path(os.environ.get("OMNI_BACKUP_DIR", OMNI_HOME / "backups")).resolve()
-BUNDLE_DIR = Path(os.environ.get("OMNI_BUNDLE_DIR", BACKUP_DIR / "host-bundles")).resolve()
-AUTO_BUNDLE_DIR = Path(os.environ.get("OMNI_AUTO_BUNDLE_DIR", BACKUP_DIR / "auto-bundles")).resolve()
-LOG_DIR = Path(os.environ.get("OMNI_LOG_DIR", OMNI_HOME / "logs")).resolve()
-WATCH_STATE_FILE = Path(os.environ.get("OMNI_WATCH_STATE_FILE", STATE_DIR / "watch_snapshot.json")).resolve()
-ENV_FILE = Path(os.environ.get("OMNI_ENV_FILE", OMNI_HOME / ".env")).resolve()
-AGENT_CONFIG_FILE = Path(os.environ.get("OMNI_AGENT_CONFIG_FILE", CONFIG_DIR / "omni_agent.json")).resolve()
-TASKS_FILE = Path(os.environ.get("OMNI_TASKS_FILE", OMNI_HOME / "tasks.json")).resolve()
-REPOS_FILE = Path(os.environ.get("OMNI_REPOS_FILE", CONFIG_DIR / "repos.json")).resolve()
-SERVERS_FILE = Path(os.environ.get("OMNI_SERVERS_FILE", CONFIG_DIR / "servers.json")).resolve()
-SYSTEM_MANIFEST_FILE = Path(
-    os.environ.get("OMNI_MANIFEST_FILE", CONFIG_DIR / "system_manifest.json")
-).resolve()
+ENV_OMNI_HOME = os.environ.get("OMNI_HOME", "").strip()
+USE_ENV_PATHS = False
+if ENV_OMNI_HOME:
+    candidate_home = Path(ENV_OMNI_HOME).expanduser()
+    if candidate_home.exists() and os.access(candidate_home, os.W_OK):
+        OMNI_HOME = candidate_home.resolve()
+        USE_ENV_PATHS = True
+    else:
+        OMNI_HOME = APP_DIR
+else:
+    OMNI_HOME = APP_DIR
+
+
+def _path_override(env_name: str, default: Path) -> Path:
+    if USE_ENV_PATHS:
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+    return default.resolve()
+
+
+CONFIG_DIR = _path_override("OMNI_CONFIG_DIR", OMNI_HOME / "config")
+STATE_DIR = _path_override("OMNI_STATE_DIR", OMNI_HOME / "data")
+BACKUP_DIR = _path_override("OMNI_BACKUP_DIR", OMNI_HOME / "backups")
+BUNDLE_DIR = _path_override("OMNI_BUNDLE_DIR", BACKUP_DIR / "host-bundles")
+AUTO_BUNDLE_DIR = _path_override("OMNI_AUTO_BUNDLE_DIR", BACKUP_DIR / "auto-bundles")
+LOG_DIR = _path_override("OMNI_LOG_DIR", OMNI_HOME / "logs")
+WATCH_STATE_FILE = _path_override("OMNI_WATCH_STATE_FILE", STATE_DIR / "watch_snapshot.json")
+ENV_FILE = _path_override("OMNI_ENV_FILE", OMNI_HOME / ".env")
+AGENT_CONFIG_FILE = _path_override("OMNI_AGENT_CONFIG_FILE", CONFIG_DIR / "omni_agent.json")
+TASKS_FILE = _path_override("OMNI_TASKS_FILE", OMNI_HOME / "tasks.json")
+REPOS_FILE = _path_override("OMNI_REPOS_FILE", CONFIG_DIR / "repos.json")
+SERVERS_FILE = _path_override("OMNI_SERVERS_FILE", CONFIG_DIR / "servers.json")
+SYSTEM_MANIFEST_FILE = _path_override("OMNI_MANIFEST_FILE", CONFIG_DIR / "system_manifest.json")
 AUTO_BACKUP_ON_CHANGE = os.environ.get("OMNI_AUTO_BACKUP_ON_CHANGE", "1").strip().lower() in {"1", "true", "yes", "on"}
 AUTO_BACKUP_KEEP = max(1, int(os.environ.get("OMNI_AUTO_BACKUP_KEEP", "5")))
 WATCH_BACKUP_COOLDOWN = max(30, int(os.environ.get("OMNI_WATCH_BACKUP_COOLDOWN", "600")))
+OMNI_DRY_RUN = os.environ.get("OMNI_DRY_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_env_file(env_path: Path) -> None:
@@ -230,6 +253,7 @@ ALIASES = {
     "tr": "transfer",
     "bc": "briefcase",
     "rp": "restore-plan",
+    "g": "guide",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -338,6 +362,31 @@ def _is_tty() -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
     except Exception:
         return False
+
+
+def _should_buffer_menu_digits(option_count: int) -> bool:
+    return int(option_count or 0) >= 10
+
+
+def _apply_menu_digit_input(buffer: str, key: str, option_count: int) -> tuple[str, int | None]:
+    if not str(key).isdigit():
+        return buffer, None
+    if not _should_buffer_menu_digits(option_count):
+        selection = int(key) - 1
+        if 0 <= selection < option_count:
+            return "", selection
+        return "", None
+    return buffer + key, None
+
+
+def _resolve_buffered_menu_selection(buffer: str, current: int, option_count: int) -> int:
+    raw = str(buffer or "").strip()
+    if not raw.isdigit():
+        return current
+    selection = int(raw) - 1
+    if 0 <= selection < option_count:
+        return selection
+    return current
 
 
 def select_menu(
@@ -543,6 +592,132 @@ def path_to_snapshot_name(raw_path: str) -> str:
     if not clean:
         return "root"
     return clean.replace("/", "__").replace(":", "")
+
+
+def discover_ssh_identity_candidates(ssh_dir: Path | str | None = None) -> List[Path]:
+    base = Path(ssh_dir or (Path.home() / ".ssh")).expanduser()
+    if not base.exists():
+        return []
+    candidates: List[Path] = []
+    for entry in sorted(base.iterdir()):
+        if not entry.is_file():
+            continue
+        if entry.name in {"known_hosts", "authorized_keys", "config"}:
+            continue
+        if entry.suffix == ".pub":
+            continue
+        candidates.append(entry)
+    return candidates
+
+
+def resolve_server_identity_file(
+    server: Dict[str, Any],
+    *,
+    ssh_dir: Path | str | None = None,
+    env: Dict[str, str] | None = None,
+) -> str:
+    explicit = str(server.get("identity_file") or "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if candidate.exists():
+            return str(candidate)
+
+    data = env if env is not None else os.environ
+    env_identity = str(data.get("OMNI_SSH_IDENTITY_FILE") or "").strip()
+    if env_identity:
+        candidate = Path(env_identity).expanduser()
+        if candidate.exists():
+            return str(candidate)
+
+    candidates = discover_ssh_identity_candidates(ssh_dir)
+    return str(candidates[0]) if candidates else ""
+
+
+def is_rsync_vanished_warning(code: int, stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}\n{stderr}".lower()
+    return int(code) == 24 and "vanish" in combined
+
+
+def resolve_latest_bundle_across_dirs(bundle_dirs: List[Path], explicit_path: str, prefix: str) -> Path | None:
+    if explicit_path:
+        candidate = Path(explicit_path).expanduser()
+        return candidate if candidate.exists() else None
+    candidates: List[Path] = []
+    for bundle_dir in bundle_dirs:
+        if not Path(bundle_dir).exists():
+            continue
+        candidates.extend(sorted(Path(bundle_dir).glob(f"{prefix}_*"), key=lambda path: path.stat().st_mtime, reverse=True))
+    return candidates[0] if candidates else None
+
+
+def build_remote_sync_command(
+    server: Dict[str, Any],
+    source_path: str,
+    target_dir: Path,
+    *,
+    ssh_dir: Path | str | None = None,
+    delete: bool = True,
+    extra_excludes: List[str] | None = None,
+    source_kind: str = "dir",
+) -> str:
+    protocol = str(server.get("protocol") or "rsync").strip().lower()
+    user = str(server.get("user") or "ubuntu").strip()
+    host = str(server.get("host") or "").strip()
+    port = int(server.get("port") or 22)
+    excludes = list(server.get("excludes") or []) + list(extra_excludes or [])
+    identity = resolve_server_identity_file(server, ssh_dir=ssh_dir)
+
+    ssh_parts = [f"ssh -p {port}", "-o StrictHostKeyChecking=accept-new"]
+    if identity:
+        ssh_parts.append(f"-i {identity}")
+    remote_source = source_path.rstrip("/") + ("/" if source_kind != "file" else "")
+
+    if protocol == "scp":
+        return f"scp -P {port} {'-i ' + identity if identity else ''} -r {user}@{host}:{remote_source} {target_dir}"
+
+    flags = ["rsync -az"]
+    if delete:
+        flags.append("--delete")
+    flags.append(f'-e "{" ".join(ssh_parts)}"')
+    for pattern in excludes:
+        flags.append(f"--exclude {pattern}")
+    flags.append(f"{user}@{host}:{remote_source}")
+    flags.append(f"{target_dir}/")
+    return " ".join(flags)
+
+
+def discover_local_runtime_paths(
+    home_root: str = "",
+    manifest: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    active_manifest = dict(manifest or {})
+    root = Path(home_root or active_manifest.get("host_root") or Path.home()).expanduser()
+    install_targets = [path for path in active_manifest.get("install_targets", []) if Path(expand_path(path, str(root))).exists()]
+    compose_projects = [path for path in active_manifest.get("compose_projects", []) if Path(expand_path(path, str(root))).exists()]
+    pm2_ecosystems = [path for path in active_manifest.get("pm2_ecosystems", []) if Path(expand_path(path, str(root))).exists()]
+    detected_projects = install_targets + compose_projects
+    runtime_markers = [path for path in active_manifest.get("state_paths", []) if Path(expand_path(path, str(root))).exists()]
+    return {
+        "ready": bool(install_targets or compose_projects or pm2_ecosystems or runtime_markers),
+        "install_targets": install_targets,
+        "compose_projects": compose_projects,
+        "pm2_ecosystems": pm2_ecosystems,
+        "detected_projects": detected_projects,
+        "runtime_markers": runtime_markers,
+    }
+
+
+def resolve_installed_inventory_across_dirs(bundle_dirs: List[Path], explicit_path: str = "") -> Dict[str, Any] | None:
+    if explicit_path:
+        explicit = Path(explicit_path).expanduser()
+        if explicit.exists():
+            return json.loads(explicit.read_text(encoding="utf-8"))
+        return None
+    for bundle_dir in bundle_dirs:
+        payload = load_installed_inventory(Path(bundle_dir))
+        if payload:
+            return payload
+    return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGO
@@ -952,6 +1127,8 @@ class OmniCore:
         self.transfer = TransferEngine()
         self.root_dir = str(OMNI_HOME)
         self.tasks_file = str(TASKS_FILE)
+        self.host_snapshot = collect_host_snapshot()
+        self.dry_run = OMNI_DRY_RUN
         self.ensure_runtime_dirs()
         self.manifest_path = SYSTEM_MANIFEST_FILE
         self.bundle_dir = BUNDLE_DIR
@@ -963,6 +1140,9 @@ class OmniCore:
     def ensure_runtime_dirs(self):
         for path in (OMNI_HOME, CONFIG_DIR, STATE_DIR, BACKUP_DIR, BUNDLE_DIR, AUTO_BUNDLE_DIR, LOG_DIR):
             path.mkdir(parents=True, exist_ok=True)
+
+    def is_dry_run(self) -> bool:
+        return bool(self.dry_run)
 
     def load_repo_entries(self) -> List[Any]:
         defaults = [
@@ -1114,6 +1294,26 @@ class OmniCore:
         AUTO_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
         return AUTO_BUNDLE_DIR
 
+    def bundle_search_dirs(self, *, include_auto: bool = True) -> List[Path]:
+        directories = [Path(self.bundle_dir), BACKUP_DIR]
+        if include_auto:
+            directories.append(self.auto_backup_dir())
+        unique: List[Path] = []
+        seen: set[str] = set()
+        for item in directories:
+            key = str(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    def _run_transfer_cmd_visible(self, cmd: str, label: str = "") -> Tuple[int, str, str]:
+        return self.transfer._run_cmd(cmd)
+
+    def list_remote_directory_entries(self, server: Dict[str, Any], root: str) -> List[Dict[str, Any]]:
+        return [{"path": root, "kind": "dir"}]
+
     def prune_bundle_dir(self, bundle_dir: Path, keep: int = AUTO_BACKUP_KEEP) -> None:
         for pattern in ("state_bundle_*", "secrets_bundle_*", "capture_summary_*.json"):
             candidates = sorted(bundle_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -1252,6 +1452,16 @@ class OmniCore:
 
         snapshot_root = STATE_DIR / "servers"
         snapshot_root.mkdir(parents=True, exist_ok=True)
+        manifest_profile = ""
+        manifest_host_root = ""
+        if Path(self.manifest_path).exists():
+            try:
+                manifest_payload = json.loads(Path(self.manifest_path).read_text(encoding="utf-8"))
+                manifest_profile = str(manifest_payload.get("profile", ""))
+                manifest_host_root = str(manifest_payload.get("host_root", "")).strip()
+            except Exception:
+                manifest_profile = ""
+                manifest_host_root = ""
 
         for server in self.servers:
             name = server.get("name") or server.get("host", "server")
@@ -1270,27 +1480,32 @@ class OmniCore:
             server_root.mkdir(parents=True, exist_ok=True)
 
             for remote_path in paths:
-                target_dir = server_root / path_to_snapshot_name(remote_path)
+                remote_source = manifest_host_root if manifest_profile == FULL_HOME_PROFILE and manifest_host_root else remote_path
+                target_dir = server_root / path_to_snapshot_name(remote_source)
                 target_dir.mkdir(parents=True, exist_ok=True)
-                exclude_flags = " ".join([f"--exclude {shlex.quote(pattern)}" for pattern in excludes])
+                bundle_excludes = [
+                    "backups/auto-bundles",
+                    f"{Path(self.root_dir).name}/backups/auto-bundles",
+                    str(Path(self.root_dir) / "backups" / "auto-bundles"),
+                ]
+                cmd = build_remote_sync_command(
+                    server,
+                    remote_source,
+                    target_dir,
+                    extra_excludes=bundle_excludes,
+                )
 
-                if protocol == "scp":
-                    cmd = f"scp -P {port} -r {user}@{host}:{shlex.quote(remote_path)} {shlex.quote(str(target_dir))}"
-                else:
-                    cmd = (
-                        f"rsync -az --delete -e \"ssh -p {port}\" {exclude_flags} "
-                        f"{user}@{host}:{shlex.quote(remote_path.rstrip('/') + '/') } {shlex.quote(str(target_dir))}/"
-                    )
-
-                logger.info("Syncing %s:%s", name, remote_path)
+                logger.info("Syncing %s:%s", name, remote_source)
                 code, out, err = self.transfer._run_cmd(cmd)
+                vanished = is_rsync_vanished_warning(code, out, err)
                 results.append({
                     "server": name,
-                    "path": remote_path,
+                    "path": remote_source,
                     "protocol": protocol,
-                    "success": code == 0,
+                    "success": code == 0 or vanished,
+                    "status": "warning_vanished" if vanished else ("ok" if code == 0 else "error"),
                     "target": str(target_dir),
-                    "error": err if code != 0 else "",
+                    "error": "" if vanished else (err if code != 0 else ""),
                     "output": out if code == 0 else "",
                 })
 
@@ -1659,6 +1874,12 @@ class OmniCore:
     def show_help(self):
         """Show help menu."""
         print_logo(tagline=True)
+        render_command_header(
+            "Omni Control Surface",
+            "Portable migration CLI with guided SSH, maleta and restore flows",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
         render_help_overview()
         section("Common Flows")
         bullet("Mover todo /home/ubuntu  -> omni start -> Migrate", C.GRN)
@@ -1669,6 +1890,8 @@ class OmniCore:
         dim("Luego saca `backups/host-bundles` fuera del host actual.")
         bullet("Configurar Omni Agent  -> omni agent", C.GRN)
         dim("Selector visual para Claude, Gemini, OpenRouter, Qwen o endpoint compatible.")
+        bullet("Abrir el launchpad operativo  -> omni guide", C.GRN)
+        dim("Menú con flechas, ETA y acceso a Connect / Briefcase / Restore / Agent.")
         nl()
 
         section("Omni Core - Command Reference")
@@ -1684,6 +1907,8 @@ class OmniCore:
         bullet("omni capture   - Build a full recovery pack from the active profile", C.GRN)
         bullet("omni restore   - Restore from latest bundle + secrets", C.GRN)
         bullet("omni migrate   - Rebuild this host end to end", C.GRN)
+        bullet("omni guide     - Open the interactive Omni launchpad", C.GRN)
+        bullet("omni connect   - Probe a remote Linux host and send the migration payload", C.GRN)
         bullet("omni briefcase - Build the portable migration contract", C.GRN)
         bullet("omni restore-plan - Derive the target-side restore sequence", C.GRN)
         bullet("omni migrate sync - Use the new migration family around the briefcase contract", C.GRN)
@@ -1743,13 +1968,14 @@ class OmniCore:
         bullet("--secrets       Explicit secrets bundle path", C.G3)
         bullet("--target-root   Restore target root", C.G3)
         bullet("--passphrase-env  Env var containing secrets passphrase", C.G3)
+        bullet("--dry-run       Preview changes without mutating host or remote target", C.G3)
         bullet("--yes           Confirm destructive purge", C.G3)
         bullet("--include-secrets  Include secret paths in purge", C.G3)
         nl()
 
         hr()
         bullet("Migration: inventory -> bundle -> secrets -> reconcile -> timer", C.G3)
-        bullet("Quickstart: init -> install.sh --compose --sync --timer", C.G3)
+        bullet("Quickstart: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omni-core/main/install.sh | bash", C.G3)
         bullet("Default entrypoint: run `omni` and choose bridge/capture/restore/migrate", C.G3)
         print("  " + q(C.G3, f"Omni Core v{OMNI_VERSION} '{OMNI_CODENAME}'"))
         print("  " + q(C.G3, "Run 'omni <command>' to execute"))
@@ -1872,6 +2098,12 @@ class OmniCore:
                 profile = self.normalize_profile("")
 
         print_logo(tagline=False)
+        render_command_header(
+            "Omni Guided Start",
+            "Detect the host, choose the migration path and keep the operator in control",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
         render_help_overview()
         section("Guided Start")
         kv("Detected Platform", f"{info_obj.system} / {info_obj.shell} / {info_obj.package_manager}", color=C.GRN)
@@ -1942,6 +2174,184 @@ class OmniCore:
             return
         self.show_help()
 
+    def guide_cmd(self) -> None:
+        print_logo(tagline=False)
+        render_command_header(
+            "Omni Guide",
+            "Arrow-key launchpad for SSH connect, maleta, restore and agent flows",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
+        entries = build_guide_entries()
+        if not self.is_interactive():
+            section("Guide")
+            for entry in entries:
+                bullet(f"{entry.title} · ETA {entry.estimated_time}", C.GRN)
+                dim(f"{entry.description} :: {entry.command}")
+            return
+
+        selected = select_menu(
+            [entry.title for entry in entries],
+            title="Selecciona el flujo que quieres ejecutar",
+            descriptions=[f"{entry.description} · ETA {entry.estimated_time}" for entry in entries],
+            icons=["🔐", "🧳", "♻️", "🧠", "🚚"],
+            default=0,
+            show_index=True,
+            footer="↑/↓ elegir flujo · Enter confirmar",
+        )
+        entry = entries[selected]
+        info(f"Abriendo {entry.title}")
+        if entry.key == "connect":
+            self.connect_cmd()
+            return
+        if entry.key == "briefcase":
+            self.show_briefcase(profile=self.normalize_profile("full-home"))
+            return
+        if entry.key == "restore":
+            self.restore_host_cmd(accept_all=self.is_dry_run())
+            return
+        if entry.key == "agent":
+            self.agent_cmd(accept_all=False)
+            return
+        self.migrate_sync_cmd()
+
+    def connect_cmd(
+        self,
+        *,
+        host: str = "",
+        user: str = "",
+        port: int = 22,
+        key_path: str = "",
+        remote_path: str = "",
+        transport: str = "rsync",
+        briefcase_path: str = "",
+        manifest_path: str = "",
+        home_root: str = "",
+        profile: str = "",
+    ) -> None:
+        print_logo(compact=True)
+        render_command_header(
+            "SSH Connect",
+            "Probe the destination host and move the migration payload over SSH",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
+        section("Remote Connection")
+
+        resolved_host = host or self.prompt_text("Destino SSH (host o IP)", "")
+        resolved_user = user or self.prompt_text("Usuario SSH", getpass.getuser())
+        resolved_port = int(port or 22)
+        if not host and self.is_interactive():
+            raw_port = self.prompt_text("Puerto SSH", str(resolved_port))
+            try:
+                resolved_port = int(raw_port)
+            except ValueError:
+                resolved_port = int(port or 22)
+        resolved_key_path = key_path or self.prompt_text("Ruta de clave SSH", "")
+
+        if not resolved_host:
+            render_human_error(
+                "Falta el host remoto para iniciar la conexión.",
+                suggestion="Usa `omni connect --host <ip|fqdn> --user <usuario>`.",
+            )
+            return
+
+        target = SSHDestination(
+            host=resolved_host,
+            user=resolved_user or getpass.getuser(),
+            port=resolved_port,
+            key_path=resolved_key_path,
+        )
+        kv("Target", target.target(), color=C.GRN)
+        kv("Transport", transport, color=C.GRN)
+        kv("Remote Path", remote_path or "~/omni-transfer", color=C.GRN)
+        if target.key_path:
+            kv("Identity", target.key_path, color=C.GRN)
+        nl()
+
+        if self.is_dry_run():
+            warn("Dry run activo: no se abrirá la conexión SSH ni se transferirán archivos.")
+            return
+
+        try:
+            with Spinner("Sondeando host remoto...", color=C.PRIMARY) as spinner:
+                remote = probe_remote_host(target)
+                spinner.finish("Host remoto detectado", success=True)
+        except Exception as err:
+            render_human_error(
+                f"No se pudo inspeccionar el host remoto: {err}",
+                suggestion="Verifica reachability SSH, puerto, usuario y key path.",
+            )
+            return
+
+        freshness = "fresh server" if remote.get("fresh_server") else "existing Linux host"
+        render_action_summary(
+            "Remote Host",
+            [
+                f"System: {remote.get('system', 'unknown')}",
+                f"Package manager: {remote.get('package_manager', 'unknown')}",
+                f"Home entries: {remote.get('home_entries', 0)}",
+                f"Git repos: {remote.get('git_repos', 0)}",
+                f"Installed packages: {remote.get('package_count', 0)}",
+                f"Heuristic: {freshness}",
+            ],
+            accent=C.GRN if remote.get("fresh_server") else C.YLW,
+        )
+
+        sources: List[str] = []
+        if briefcase_path:
+            sources.append(str(Path(briefcase_path).expanduser()))
+        else:
+            selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile or FULL_HOME_PROFILE)
+            report = scan_home(home_root or manifest.get("host_root") or str(Path.home()), manifest)
+            briefcase = build_briefcase_manifest(manifest, detect_platform_info(), inventory_report=report)
+            temp_dir = Path(tempfile.mkdtemp(prefix="omni-connect-"))
+            generated = temp_dir / "briefcase.json"
+            generated.write_text(json.dumps(briefcase, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            sources.append(str(generated))
+            dim(f"Briefcase generado desde {selected_path}")
+
+        latest_state = latest_or_explicit(self.bundle_dir, "", "state_bundle")
+        latest_secrets = latest_or_explicit(self.bundle_dir, "", "secrets_bundle")
+        if latest_state:
+            sources.append(str(latest_state))
+        if latest_secrets:
+            sources.append(str(latest_secrets))
+
+        try:
+            with Spinner("Transfiriendo payload...", color=C.PRIMARY) as spinner:
+                result = transfer_payload(
+                    sources,
+                    target,
+                    remote_path=remote_path or "~/omni-transfer",
+                    transport=transport,
+                )
+                spinner.finish("Transferencia terminada", success=result.get("success", False))
+        except Exception as err:
+            render_human_error(
+                f"La transferencia falló: {err}",
+                suggestion="Prueba `--protocol sftp` si rsync no está disponible en alguno de los dos extremos.",
+            )
+            return
+
+        if not result.get("success"):
+            render_human_error(
+                result.get("stderr") or result.get("stdout") or "SSH transfer failed",
+                suggestion="Verifica permisos del destino y que el directorio remoto exista o pueda crearse.",
+            )
+            return
+
+        render_action_summary(
+            "Payload Sent",
+            [
+                f"Target: {target.target()}:{remote_path or '~/omni-transfer'}",
+                f"Transport: {result.get('transport', transport)}",
+                f"Files: {len(sources)}",
+                "Next: inicia sesión en el host destino y ejecuta `omni guide` o `omni restore`.",
+            ],
+            accent=C.GRN,
+        )
+
     def show_doctor(self):
         print_logo(compact=True)
         section("Doctor")
@@ -2008,7 +2418,19 @@ class OmniCore:
             target_private_ip=target_private_ip,
             target_hostname=target_hostname,
         )
-        plan = build_rewrite_plan(scan_root, context["replacements"]) if context["replacements"] else None
+        if not context.get("summary_found") and self.servers:
+            identity = detect_host_identity()
+            fallback_host = str(self.servers[0].get("host") or "").strip()
+            replacement = identity.public_ip or identity.private_ip or identity.hostname or ""
+            if fallback_host and replacement:
+                context = dict(context)
+                context["summary_found"] = True
+                context["summary"] = {"source": "server-config-fallback"}
+                context["replacements"] = {fallback_host: replacement}
+        if context.get("summary", {}).get("source") == "server-config-fallback":
+            plan = None
+        else:
+            plan = build_rewrite_plan(scan_root, context["replacements"]) if context["replacements"] else None
         return {
             "scan_root": str(scan_root),
             "context": context,
@@ -2136,6 +2558,8 @@ class OmniCore:
         profile: str = "",
         show_summary: bool = True,
         auto_backup: bool = True,
+        allow_missing_bundles: bool = False,
+        recover_apps_ips: bool = False,
         before_services=None,
     ):
         print_logo(compact=True)
@@ -2143,18 +2567,38 @@ class OmniCore:
         self.init_workspace(profile=profile)
         selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
         passphrase = self.read_passphrase(passphrase_env)
-        resolved_bundle = str(latest_or_explicit(self.bundle_dir, bundle_path, "state_bundle") or "")
-        resolved_secrets = str(latest_or_explicit(self.bundle_dir, secrets_path, "secrets_bundle") or "")
+        search_dirs = self.bundle_search_dirs(include_auto=not allow_missing_bundles)
+        resolved_bundle = str(resolve_latest_bundle_across_dirs(search_dirs, bundle_path, "state_bundle") or "")
+        resolved_secrets = str(resolve_latest_bundle_across_dirs(search_dirs, secrets_path, "secrets_bundle") or "")
+        used_bundles = bool(resolved_bundle or resolved_secrets)
+        bootstrap_only = False
+        hydration_result: Dict[str, Any] | None = None
+        resolve_installed_inventory_across_dirs(search_dirs)
 
-        if not resolved_bundle:
-            fail("State bundle not found. Run `omni capture` or pass --bundle.")
-            return
-        if not resolved_secrets:
-            fail("Secrets bundle not found. Run `omni capture` or pass --secrets.")
-            return
+        if not resolved_bundle or not resolved_secrets:
+            if not allow_missing_bundles:
+                if not resolved_bundle:
+                    fail("State bundle not found. Run `omni capture` or pass --bundle.")
+                if not resolved_secrets:
+                    fail("Secrets bundle not found. Run `omni capture` or pass --secrets.")
+                return {"success": False, "bootstrap_only": False, "used_bundles": False}
+            bootstrap_only = True
+            resolved_bundle = ""
+            resolved_secrets = ""
+
+        local_runtime = discover_local_runtime_paths(home_root or str(manifest.get("host_root") or ""), manifest)
+        if bootstrap_only:
+            if recover_apps_ips and local_runtime.get("ready"):
+                manifest = dict(manifest)
+                manifest["install_targets"] = sorted(set(list(manifest.get("install_targets", [])) + list(local_runtime.get("install_targets", []))))
+                manifest["compose_projects"] = sorted(set(list(manifest.get("compose_projects", [])) + list(local_runtime.get("compose_projects", []))))
+                manifest["pm2_ecosystems"] = sorted(set(list(manifest.get("pm2_ecosystems", [])) + list(local_runtime.get("pm2_ecosystems", []))))
+                hydration_result = {"success": True, "source": "local_recover_apps_ips", "runtime": local_runtime}
+            elif self.servers and not local_runtime.get("ready") and not any(server.get("paths") for server in self.servers):
+                hydration_result = self.hydrate_from_remote_servers(target_root=target_root, manifest=manifest)
         if not self.confirm_step("Restore and reconcile this host now?", accept_all=accept_all):
             warn("Restore cancelled.")
-            return
+            return {"success": False, "bootstrap_only": bootstrap_only, "used_bundles": used_bundles}
 
         report = reconcile_host(
             manifest,
@@ -2202,6 +2646,13 @@ class OmniCore:
             render_action_summary("Restore completo", summary_lines, accent=C.GRN)
         else:
             self.write_json_output(report)
+        return {
+            "success": True,
+            "bootstrap_only": bootstrap_only,
+            "used_bundles": used_bundles,
+            "hydration_result": hydration_result,
+            "report": report,
+        }
 
     def detect_ip_cmd(self):
         print_logo(compact=True)
@@ -2326,7 +2777,7 @@ class OmniCore:
                 "replacements": drift["total_replacements"],
             }
 
-        self.restore_host_cmd(
+        result = self.restore_host_cmd(
             manifest_path=manifest_path,
             home_root=home_root,
             bundle_path=bundle_path,
@@ -2341,6 +2792,8 @@ class OmniCore:
             auto_backup=False,
             before_services=before_services_hook,
         )
+        if not result or not result.get("success"):
+            return result
         if AUTO_BACKUP_ON_CHANGE:
             info("Creando backup automático post-migrate...")
             self.run_backup(
@@ -2364,6 +2817,61 @@ class OmniCore:
             if rewrite_status not in {"applied", "aligned"}:
                 lines.append("$ omni rewrite-ip --apply")
             render_action_summary("Migración finalizada", lines, accent=C.GRN)
+        return result
+
+    def hydrate_from_remote_servers(
+        self,
+        *,
+        target_root: str,
+        manifest: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        results: List[Dict[str, Any]] = []
+        active_manifest = dict(manifest or {})
+        profile = str(active_manifest.get("profile", ""))
+        host_root = str(active_manifest.get("host_root", "")).strip()
+
+        for server in self.servers:
+            remote_roots = [host_root] if profile == FULL_HOME_PROFILE and host_root else list(server.get("paths", []) or [])
+            if not remote_roots:
+                remote_roots = [host_root or "/home/ubuntu"]
+            for remote_root in remote_roots:
+                if str(remote_root) == str(Path(self.root_dir)):
+                    results.append({"server": server.get("name", server.get("host", "server")), "path": remote_root, "status": "skipped_omni_home"})
+                    continue
+                entries = self.list_remote_directory_entries(server, remote_root)
+                if not entries:
+                    entries = [{"path": remote_root, "kind": "dir"}]
+                for entry in entries:
+                    source_path = str(entry.get("path") or remote_root)
+                    source_kind = str(entry.get("kind") or "dir")
+                    source_target = Path(target_root) / source_path.lstrip("/")
+                    target_dir = source_target.parent if source_kind == "file" else source_target
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    command = build_remote_sync_command(
+                        server,
+                        source_path,
+                        target_dir,
+                        delete=False,
+                        source_kind=source_kind,
+                    )
+                    code, out, err = self._run_transfer_cmd_visible(command, f"hydrate :: {source_path}")
+                    imported_entries = 0
+                    if source_kind == "file":
+                        imported_entries = 1 if source_target.exists() else 0
+                    elif source_target.exists():
+                        imported_entries = sum(1 for _ in source_target.rglob("*"))
+                    status = "ok" if imported_entries > 0 else "empty_import"
+                    results.append(
+                        {
+                            "server": server.get("name", server.get("host", "server")),
+                            "path": source_path,
+                            "status": status,
+                            "after": {"entries": imported_entries},
+                            "command": command,
+                            "success": code == 0 and imported_entries > 0,
+                        }
+                    )
+        return {"success": all(item.get("status") in {"ok", "skipped_omni_home"} for item in results) and bool(results), "results": results}
 
     def bridge_mode(self, *, accept_all: bool = False, dest: str = "", protocol: str = "rsync", profile: str = ""):
         print_logo(compact=True)
@@ -2423,16 +2931,20 @@ class OmniCore:
 
     def show_install_guide(self):
         print_logo(tagline=False)
+        render_command_header(
+            "Install Omni Core",
+            "One-line install and operator-ready first boot",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
         render_help_overview()
         section("Portable Install")
-        bullet("1. Desde PowerShell ejecuta bootstrap.ps1 sin -Destination para escanear rutas y elegir ubicación", C.GRN)
-        bullet("2. O copia/clona este repo manualmente en la ruta Linux que prefieras", C.GRN)
-        bullet("3. Run: omni init --profile full-home", C.GRN)
-        bullet("4. Edit .env, config/repos.json, config/servers.json and system_manifest.json", C.GRN)
-        bullet("5. Run: ./install.sh --compose --sync --timer", C.GRN)
-        bullet("6. Run `omni` to enter the guided start flow", C.GRN)
-        bullet("7. Capture recovery set: omni capture", C.GRN)
-        bullet("8. Rebuild host: omni migrate or omni restore", C.GRN)
+        bullet("1. Linux/macOS/WSL: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omni-core/main/install.sh | bash", C.GRN)
+        bullet("2. El instalador deja Omni en ~/.omni y el wrapper en ~/.local/bin/omni", C.GRN)
+        bullet("3. Ejecuta `omni` o `omni guide` para entrar al flujo guiado", C.GRN)
+        bullet("4. Usa `omni connect` para enlazar el host origen con el destino por SSH", C.GRN)
+        bullet("5. Usa `omni briefcase --full` para generar maleta + restore script", C.GRN)
+        bullet("6. Usa `omni restore` o `omni migrate sync restore` en el destino", C.GRN)
         nl()
 
     def show_inventory(self, manifest_path: str = "", home_root: str = "", output: str = "", profile: str = ""):
@@ -2986,6 +3498,7 @@ def main():
     parser.add_argument("--compress", action="store_true", default=True, help="Enable compression")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument("--dry-run", action="store_true", help="Preview actions without mutating local or remote state")
     parser.add_argument("--help", "-h", action="store_true", help="Show help")
     parser.add_argument("--manifest", type=str, default=str(SYSTEM_MANIFEST_FILE), help="Path to system manifest")
     parser.add_argument("--output", type=str, default="", help="Output file or directory")
@@ -3010,6 +3523,11 @@ def main():
     parser.add_argument("--skip-rewrite", action="store_true", help="Skip automatic host reference rewrite during migrate")
     parser.add_argument("--dest", type=str, default="", help="Remote destination for bridge send")
     parser.add_argument("--briefcase", type=str, default="", help="Path to an exported briefcase JSON")
+    parser.add_argument("--host", type=str, default="", help="SSH destination host for omni connect")
+    parser.add_argument("--user", type=str, default="", help="SSH user for omni connect")
+    parser.add_argument("--port", type=int, default=22, help="SSH port for omni connect")
+    parser.add_argument("--key-path", type=str, default="", help="Path to SSH identity file")
+    parser.add_argument("--remote-path", type=str, default="~/omni-transfer", help="Remote directory for payload transfer")
 
     args, remaining = parser.parse_known_args()
     args.profile = str(args.profile or "").strip().lower().replace("_", "-")
@@ -3020,6 +3538,10 @@ def main():
     if args.verbose:
         global OMNI_VERBOSE
         OMNI_VERBOSE = True
+    if args.dry_run:
+        global OMNI_DRY_RUN
+        OMNI_DRY_RUN = True
+        os.environ["OMNI_DRY_RUN"] = "1"
 
     # Resolve alias
     action = ALIASES.get(args.action, args.action)
@@ -3044,6 +3566,8 @@ def main():
             )
         elif action == "status":
             core.show_status()
+        elif action == "guide":
+            core.guide_cmd()
         elif action == "doctor":
             core.show_doctor()
         elif action == "logs":
@@ -3066,6 +3590,19 @@ def main():
                 hint("Usage: omni transfer <src> <dest>")
         elif action == "config":
             core.show_config()
+        elif action == "connect":
+            core.connect_cmd(
+                host=args.host,
+                user=args.user,
+                port=args.port,
+                key_path=args.key_path,
+                remote_path=args.remote_path,
+                transport=args.protocol,
+                briefcase_path=args.briefcase,
+                manifest_path=args.manifest,
+                home_root=args.home_root,
+                profile=args.profile,
+            )
         elif action == "version":
             core.show_version()
         elif action == "monitor":
@@ -3204,8 +3741,10 @@ def main():
         elif action == "purge":
             core.purge_cmd(args.manifest, args.home_root, args.include_secrets, args.yes, profile=args.profile)
         else:
-            print(f"Unknown action: {action}")
-            hint("Run 'omni help' for available commands")
+            render_human_error(
+                f"Unknown action: {action}",
+                suggestion="Run `omni help` or `omni guide` for available commands.",
+            )
     except KeyboardInterrupt:
         print()
         warn("Operación cancelada por el usuario.")

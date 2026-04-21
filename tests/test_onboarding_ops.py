@@ -80,7 +80,8 @@ class OnboardingOpsTests(unittest.TestCase):
         menu = build_start_menu(info)
         self.assertEqual(menu["recommended_flow"], "migrate")
         self.assertFalse(menu["non_interactive"])
-        self.assertEqual(len(menu["options"]), 6)
+        self.assertEqual(len(menu["options"]), 8)
+        self.assertTrue(any(option["key"] == "advanced" for option in menu["options"]))
 
     def test_build_flow_prompt_mentions_recommendation(self):
         prompt = build_flow_prompt(

@@ -7,7 +7,7 @@ from typing import Mapping
 from platform_ops import PlatformInfo, detect_platform_info, detect_shell_family, is_non_interactive
 
 
-FLOW_ORDER = ("bridge", "capture", "restore", "migrate", "doctor", "agent", "advanced")
+FLOW_ORDER = ("bridge", "capture", "restore", "migrate", "doctor", "agent", "chat", "advanced")
 
 FLOW_ALIASES = {
     "1": "bridge",
@@ -35,7 +35,10 @@ FLOW_ALIASES = {
     "ia": "agent",
     "ai": "agent",
     "omni agent": "agent",
-    "7": "advanced",
+    "7": "chat",
+    "chat": "chat",
+    "omni chat": "chat",
+    "8": "advanced",
     "advanced": "advanced",
     "expert": "advanced",
 }
@@ -96,6 +99,7 @@ def build_flow_options(platform_info: PlatformInfo | None = None) -> list[FlowOp
         FlowOption("migrate", "Migrate", "Rebuild or move a full host end to end.", recommended == "migrate"),
         FlowOption("doctor", "Doctor", "Inspect health, disk, timers and cleanup opportunities.", recommended == "doctor"),
         FlowOption("agent", "Agent", "Configure Omni Agent with Claude, Gemini, OpenRouter, Qwen or a custom endpoint.", recommended == "agent"),
+        FlowOption("chat", "Chat", "Open the operator chat surface and example prompts.", recommended == "chat"),
         FlowOption("advanced", "Advanced", "Use lower-level Omni commands directly.", recommended == "advanced"),
     ]
 
@@ -111,7 +115,7 @@ def build_start_questions(
         GuidedQuestion(
             key="entry_mode",
             prompt="Prefieres usar Omni como puente o como migracion?",
-            choices=("bridge", "capture", "restore", "migrate", "doctor", "agent", "advanced"),
+            choices=("bridge", "capture", "restore", "migrate", "doctor", "agent", "chat", "advanced"),
             default=recommended,
         ),
         GuidedQuestion(
@@ -169,6 +173,7 @@ def build_flow_prompt(
         "4. Migrate or rebuild this host\n"
         "5. Doctor / cleanup / disk recovery\n"
         "6. Configure Omni Agent\n"
+        "7. Open chat surface\n"
         f"Recommended default: {recommended}\n"
         "Answer with a number or a flow name."
     )
