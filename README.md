@@ -2,6 +2,68 @@
 
 Omni Core está orientado a restaurar un entorno productivo limpio en Linux o un `full-home` completo de `/home/ubuntu`, sincronizar estado real desde otros hosts y dejar mantenimiento automático sin arrastrar ruido innecesario.
 
+## Instalación rápida
+
+Instalación pública recomendada:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sxrubyo/omni-core/main/install.sh | bash
+```
+
+Luego:
+
+```bash
+omni
+omni guide
+omni briefcase --full --output ~/omni-briefcase.json
+```
+
+## Superficie principal
+
+Omni ya expone estas rutas operativas:
+
+- `omni guide`
+  - launchpad interactivo con flechas para SSH Connect, Briefcase, Restore, AI Agent y Migrate Sync
+- `omni connect`
+  - conecta dos máquinas por SSH, detecta si el host remoto es limpio o existente y envía briefcase + restore script
+- `omni briefcase --full`
+  - genera la maleta completa con inventario real del host y un restore script portable
+- `omni restore-plan`
+  - deriva el plan de restauración según la plataforma destino
+- `omni agent`
+  - configura proveedor/modelo y deja bridges para Claude Code, Codex CLI y Gemini CLI
+- `omni chat`
+  - habla con el agente, ejecuta comandos `omni` seguros y resume el siguiente paso
+- `omni auth github`
+  - guarda credenciales GitHub en `~/.omni/config.json`
+- `omni push`
+  - sube el briefcase JSON y el restore script a un repo privado
+- `omni pull`
+  - descarga la última maleta desde GitHub en una máquina nueva
+
+## Qué incluye `omni briefcase --full`
+
+La maleta completa inventaría:
+
+- paquetes del sistema
+- paquetes Python
+- paquetes npm globales
+- paquetes Cargo
+- Homebrew formulae/casks
+- Snap y Flatpak
+- extensiones de VS Code
+- `git config --global`
+- llaves SSH públicas
+- dotfiles principales
+- crontab del usuario
+- servicios systemd habilitados
+- contenedores e imágenes Docker
+
+Y deja dos artefactos:
+
+- `briefcase.json`
+- `briefcase.restore.sh`
+
 Ahora el punto de entrada recomendado ya no es memorizar comandos bajos: es ejecutar `omni` o `omni start` y dejar que la CLI te guíe hacia `bridge`, `capture`, `restore`, `migrate` o `doctor`.
 
 Por defecto no intenta clonar `/home/ubuntu` tal cual.

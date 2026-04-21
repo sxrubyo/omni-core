@@ -17,6 +17,7 @@ import subprocess
 import shlex
 import shutil
 import platform
+import socket
 import textwrap
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
@@ -51,6 +52,19 @@ from cli_ux_ops import collect_host_snapshot, render_command_header, render_huma
 from cleanup_ops import build_purge_plan, execute_purge
 from connect_ops import SSHDestination, probe_remote_host, transfer_payload
 from full_inventory_ops import collect_full_inventory
+from github_ops import (
+    GitHubTarget,
+    download_text,
+    ensure_private_repo,
+    gh_cli_token,
+    github_identity,
+    latest_briefcase_entry,
+    list_directory,
+    load_global_config,
+    parse_repo_slug,
+    put_file,
+    save_global_config,
+)
 from guide_ops import build_guide_entries
 from host_inventory import (
     DEFAULT_PROFILE,
@@ -105,6 +119,7 @@ AGENT_CONFIG_FILE = _path_override("OMNI_AGENT_CONFIG_FILE", CONFIG_DIR / "omni_
 AGENT_SKILL_DIR = _path_override("OMNI_AGENT_SKILL_DIR", Path.home() / ".omni" / "skills")
 CHAT_SESSION_DIR = _path_override("OMNI_CHAT_SESSION_DIR", STATE_DIR / "chat")
 AGENT_ACTIVATION_FILE = _path_override("OMNI_AGENT_ACTIVATION_FILE", CONFIG_DIR / "omni_agent_activation.txt")
+GLOBAL_CONFIG_FILE = _path_override("OMNI_GLOBAL_CONFIG_FILE", Path.home() / ".omni" / "config.json")
 TASKS_FILE = _path_override("OMNI_TASKS_FILE", OMNI_HOME / "tasks.json")
 REPOS_FILE = _path_override("OMNI_REPOS_FILE", CONFIG_DIR / "repos.json")
 SERVERS_FILE = _path_override("OMNI_SERVERS_FILE", CONFIG_DIR / "servers.json")
@@ -2079,6 +2094,206 @@ class OmniCore:
             pass
         save_chat_session(session_path, session)
 
+    def load_global_config(self) -> Dict[str, Any]:
+        return load_global_config(GLOBAL_CONFIG_FILE)
+
+    def save_global_config(self, payload: Dict[str, Any]) -> None:
+        save_global_config(GLOBAL_CONFIG_FILE, payload)
+
+    def build_briefcase_export(
+        self,
+        *,
+        manifest_path: str = "",
+        home_root: str = "",
+        profile: str = "",
+        full: bool = True,
+    ) -> Dict[str, Any]:
+        selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile or FULL_HOME_PROFILE)
+        effective_home_root = home_root or manifest.get("host_root") or str(Path.home())
+        report = scan_home(effective_home_root, manifest)
+        full_inventory = collect_full_inventory(home_root=effective_home_root) if full else None
+        briefcase = build_briefcase_manifest(
+            manifest,
+            detect_platform_info(),
+            inventory_report=report,
+            full_inventory=full_inventory,
+        )
+        return {
+            "manifest_path": str(selected_path),
+            "briefcase": briefcase,
+            "restore_script": build_restore_script(briefcase, fresh_server=True),
+        }
+
+    def auth_cmd(self, subaction: str = "", *, repo_slug: str = "") -> None:
+        normalized = str(subaction or "").strip().lower()
+        if normalized not in {"github", "gh"}:
+            render_human_error(
+                "Auth provider no soportado.",
+                suggestion="Usa `omni auth github` para guardar GitHub OAuth/PAT en ~/.omni/config.json.",
+            )
+            return
+
+        print_logo(compact=True)
+        section("GitHub Auth")
+        existing = self.load_global_config().get("github") or {}
+
+        token = os.environ.get("GITHUB_TOKEN", "").strip() or gh_cli_token()
+        source = "env" if os.environ.get("GITHUB_TOKEN", "").strip() else "gh-cli"
+        if not token and self.is_interactive():
+            token = getpass.getpass("GitHub PAT (repo/private repo scope): ").strip()
+            source = "pat"
+        if not token:
+            render_human_error(
+                "No encontré un token de GitHub usable.",
+                suggestion="Haz `gh auth login` o exporta `GITHUB_TOKEN`, luego corre `omni auth github`.",
+            )
+            return
+
+        identity = github_identity(token)
+        owner = str(identity.get("login") or existing.get("owner") or "").strip()
+        resolved_repo = repo_slug or str(existing.get("repo") or "omni-migrate-sync-private")
+        target = parse_repo_slug(resolved_repo, default_owner=owner)
+
+        config = self.load_global_config()
+        config["github"] = {
+            "owner": target.owner,
+            "repo": target.repo,
+            "token": token,
+            "auth_source": source,
+            "authenticated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "user": owner,
+        }
+        if self.is_dry_run():
+            warn("Dry run activo: no se persistió ~/.omni/config.json.")
+        else:
+            self.save_global_config(config)
+            ok(f"GitHub auth guardado para {target.slug}")
+        render_action_summary(
+            "GitHub",
+            [
+                f"User: {owner}",
+                f"Repo: {target.slug}",
+                f"Source: {source}",
+                f"Config: {GLOBAL_CONFIG_FILE}",
+            ],
+            accent=C.GRN,
+        )
+
+    def push_cmd(self, *, manifest_path: str = "", home_root: str = "", profile: str = "", briefcase_path: str = "", repo_slug: str = "") -> None:
+        print_logo(compact=True)
+        section("GitHub Push")
+        config = self.load_global_config().get("github") or {}
+        token = str(config.get("token") or "").strip()
+        if not token:
+            render_human_error(
+                "GitHub auth no está configurado.",
+                suggestion="Ejecuta `omni auth github` antes de `omni push`.",
+            )
+            return
+
+        owner = str(config.get("owner") or "").strip()
+        repo_value = repo_slug or str(config.get("repo") or "omni-migrate-sync-private")
+        target = parse_repo_slug(repo_value, default_owner=owner)
+        ensure_private_repo(target, token=token)
+
+        if briefcase_path:
+            briefcase_text = Path(briefcase_path).expanduser().read_text(encoding="utf-8")
+            briefcase = json.loads(briefcase_text)
+            restore_script = build_restore_script(briefcase, fresh_server=True)
+        else:
+            export = self.build_briefcase_export(manifest_path=manifest_path, home_root=home_root, profile=profile, full=True)
+            briefcase = export["briefcase"]
+            briefcase_text = json.dumps(briefcase, indent=2, ensure_ascii=False) + "\n"
+            restore_script = str(export["restore_script"])
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        host = socket.gethostname().split(".", 1)[0] or "host"
+        briefcase_remote_path = f"briefcases/{stamp}-{host}.json"
+        restore_remote_path = f"briefcases/{stamp}-{host}.restore.sh"
+
+        if not self.is_dry_run():
+            put_file(target, briefcase_remote_path, briefcase_text, token=token, message=f"Add briefcase {stamp} from {host}")
+            put_file(target, restore_remote_path, restore_script, token=token, message=f"Add restore script {stamp} from {host}")
+        else:
+            warn("Dry run activo: no se subieron archivos a GitHub.")
+        render_action_summary(
+            "GitHub Push",
+            [
+                f"Repo: {target.slug}",
+                f"Briefcase: {briefcase_remote_path}",
+                f"Restore: {restore_remote_path}",
+            ],
+            accent=C.GRN,
+        )
+
+    def pull_cmd(self, *, output: str = "", apply_restore: bool = False, repo_slug: str = "") -> None:
+        print_logo(compact=True)
+        section("GitHub Pull")
+        config = self.load_global_config().get("github") or {}
+        token = str(config.get("token") or "").strip()
+        if not token:
+            render_human_error(
+                "GitHub auth no está configurado.",
+                suggestion="Ejecuta `omni auth github` antes de `omni pull`.",
+            )
+            return
+
+        owner = str(config.get("owner") or "").strip()
+        repo_value = repo_slug or str(config.get("repo") or "omni-migrate-sync-private")
+        target = parse_repo_slug(repo_value, default_owner=owner)
+        entries = list_directory(target, "briefcases", token=token)
+        latest = latest_briefcase_entry(entries)
+        if not latest:
+            render_human_error(
+                "No encontré briefcases en el repo privado.",
+                suggestion="Empuja uno primero con `omni push`.",
+            )
+            return
+
+        download_dir = Path(output).expanduser() if output else (OMNI_HOME / "imports")
+        download_dir.mkdir(parents=True, exist_ok=True)
+        briefcase_path = download_dir / str(latest.get("name"))
+        briefcase_text = "" if self.is_dry_run() else download_text(target, str(latest.get("path")), token=token)
+        if not self.is_dry_run():
+            briefcase_path.write_text(briefcase_text, encoding="utf-8")
+
+        restore_name = briefcase_path.name.replace(".json", ".restore.sh")
+        restore_entry = next((entry for entry in entries if str(entry.get("name")) == restore_name), None)
+        restore_path = download_dir / restore_name
+        if restore_entry:
+            if not self.is_dry_run():
+                restore_text = download_text(target, str(restore_entry.get("path")), token=token)
+                restore_path.write_text(restore_text, encoding="utf-8")
+                restore_path.chmod(0o755)
+
+        render_action_summary(
+            "GitHub Pull",
+            [
+                f"Repo: {target.slug}",
+                f"Briefcase: {briefcase_path}",
+                f"Restore script: {restore_path if restore_entry else 'missing'}",
+            ],
+            accent=C.GRN,
+        )
+
+        if self.is_dry_run():
+            warn("Dry run activo: no se descargaron archivos ni se ejecutó restore.")
+            return
+
+        if apply_restore and restore_entry and not self.is_dry_run():
+            result = subprocess.run(["bash", str(restore_path)], capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                render_human_error(
+                    result.stderr or result.stdout or "El restore script descargado falló.",
+                    suggestion="Revisa el host destino o ejecuta `omni restore-plan --briefcase <archivo>`.",
+                )
+                return
+            render_action_summary(
+                "Restore aplicado",
+                (result.stdout or "Restore script ejecutado.").strip().splitlines()[:8],
+                accent=C.GRN,
+            )
+
     def show_help(self):
         """Show help menu."""
         print_logo(tagline=True)
@@ -2123,6 +2338,9 @@ class OmniCore:
         bullet("omni restore-plan - Derive the target-side restore sequence", C.GRN)
         bullet("omni migrate sync - Use the new migration family around the briefcase contract", C.GRN)
         bullet("omni chat      - Talk to Omni Agent and let it run safe `omni` actions", C.GRN)
+        bullet("omni auth github - Save GitHub auth for private briefcase sync", C.GRN)
+        bullet("omni push      - Push the latest briefcase to the private GitHub repo", C.GRN)
+        bullet("omni pull      - Pull the latest briefcase from GitHub on a new host", C.GRN)
         nl()
 
         print("  " + q(C.W, "ADVANCED COMMANDS", bold=True))
@@ -2153,6 +2371,9 @@ class OmniCore:
         bullet("omni rewrite-ip - Rewrite old host references safely", C.PRIMARY)
         bullet("omni agent     - Configure Omni Agent provider and model", C.PRIMARY)
         bullet("omni chat      - Run the conversational agent surface", C.PRIMARY)
+        bullet("omni auth      - Configure GitHub auth for push/pull", C.PRIMARY)
+        bullet("omni push      - Upload briefcase + restore script to GitHub", C.PRIMARY)
+        bullet("omni pull      - Download latest GitHub briefcase locally", C.PRIMARY)
         bullet("omni bridge    - Create/send/receive migration packs", C.PRIMARY)
         bullet("omni timer-install - Install daily timer + change watcher service", C.PRIMARY)
         bullet("omni purge - Delete transferred state and repo artifacts to free disk", C.PRIMARY)
@@ -3785,6 +4006,7 @@ def main():
     parser.add_argument("--briefcase", type=str, default="", help="Path to an exported briefcase JSON")
     parser.add_argument("--restore-script", type=str, default="", help="Path for the generated restore shell script")
     parser.add_argument("--full", action="store_true", help="Capture the full maleta inventory and emit a restore script")
+    parser.add_argument("--repo", type=str, default="", help="GitHub repo slug (owner/repo) for auth/push/pull flows")
     parser.add_argument("--host", type=str, default="", help="SSH destination host for omni connect")
     parser.add_argument("--user", type=str, default="", help="SSH user for omni connect")
     parser.add_argument("--port", type=int, default=22, help="SSH port for omni connect")
@@ -3832,6 +4054,18 @@ def main():
             core.guide_cmd()
         elif action == "chat":
             core.chat_cmd(" ".join(remaining), accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
+        elif action == "auth":
+            core.auth_cmd(remaining[0] if remaining else "", repo_slug=args.repo)
+        elif action == "push":
+            core.push_cmd(
+                manifest_path=args.manifest,
+                home_root=args.home_root,
+                profile=args.profile,
+                briefcase_path=args.briefcase,
+                repo_slug=args.repo,
+            )
+        elif action == "pull":
+            core.pull_cmd(output=args.output, apply_restore=args.apply, repo_slug=args.repo)
         elif action == "doctor":
             core.show_doctor()
         elif action == "logs":
