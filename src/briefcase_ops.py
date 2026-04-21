@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import shlex
+from pathlib import Path
 from typing import Any, Mapping
 
 from platform_ops import PlatformInfo
@@ -39,9 +41,12 @@ def build_briefcase_manifest(
     platform_info: PlatformInfo | Mapping[str, Any],
     *,
     inventory_report: Mapping[str, Any] | None = None,
+    full_inventory: Mapping[str, Any] | None = None,
     repo_slug: str = "sxrubyo/omni-core",
 ) -> dict[str, Any]:
     source_platform = _platform_dict(platform_info)
+    payload = dict(full_inventory or {})
+    package_payload = dict(payload.get("packages") or {})
     return {
         "schema_version": BRIEFCASE_SCHEMA_VERSION,
         "kind": "omni-briefcase",
@@ -63,11 +68,18 @@ def build_briefcase_manifest(
             "pm2_ecosystems": list(manifest.get("pm2_ecosystems", [])),
             "compose_projects": list(manifest.get("compose_projects", [])),
             "packages": {
-                "system": list(manifest.get("apt_packages", [])),
-                "node_global": list(manifest.get("npm_global_packages", [])),
+                "system": list(package_payload.get("system") or manifest.get("apt_packages", [])),
+                "python": list(package_payload.get("python") or manifest.get("python_packages", [])),
+                "node_global": list(package_payload.get("node_global") or manifest.get("npm_global_packages", [])),
+                "cargo": list(package_payload.get("cargo", [])),
+                "brew_formulae": list(package_payload.get("brew_formulae", [])),
+                "brew_casks": list(package_payload.get("brew_casks", [])),
+                "snap": list(package_payload.get("snap", [])),
+                "flatpak": list(package_payload.get("flatpak", [])),
             },
             "summary": _inventory_summary(inventory_report),
         },
+        "full_inventory": payload,
         "transport": {
             "preferred": list(TRANSPORT_PREFERENCE),
             "github": {
@@ -279,3 +291,202 @@ def build_restore_plan(
         "steps": steps,
         "capability_gaps": capability_gaps,
     }
+
+
+def _shell_lines(command: str, values: list[str], *, indent: str = "  ") -> list[str]:
+    if not values:
+        return []
+    lines = [command + " \\"]
+    for index, value in enumerate(values):
+        suffix = " \\" if index < len(values) - 1 else ""
+        lines.append(f"{indent}{shlex.quote(value)}{suffix}")
+    return lines
+
+
+def build_restore_script(
+    briefcase_manifest: Mapping[str, Any],
+    *,
+    fresh_server: bool = True,
+) -> str:
+    inventory = dict(briefcase_manifest.get("inventory", {}))
+    packages = dict(inventory.get("packages", {}))
+    full_inventory = dict(briefcase_manifest.get("full_inventory") or {})
+    git_config = dict((full_inventory.get("git") or {}).get("global_config") or {})
+    public_keys = list((full_inventory.get("ssh") or {}).get("public_keys") or [])
+    dotfiles = list(full_inventory.get("dotfiles") or [])
+    crontab_lines = list((full_inventory.get("cron") or {}).get("user") or [])
+    vscode_extensions = list(full_inventory.get("vscode_extensions") or [])
+
+    lines: list[str] = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        'echo "==> Omni Migrate Sync restore bootstrap"',
+        f'echo "Fresh server mode: {"yes" if fresh_server else "no"}"',
+        "",
+    ]
+
+    system_packages = list(packages.get("system", []))
+    if system_packages:
+        lines.extend(
+            [
+                "if command -v apt-get >/dev/null 2>&1; then",
+                '  echo "==> Installing system packages via apt-get"',
+                "  sudo apt-get update",
+            ]
+        )
+        lines.extend(_shell_lines("  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y", system_packages, indent="    "))
+        lines.extend(["fi", ""])
+
+    python_packages = list(packages.get("python", []))
+    if python_packages:
+        lines.extend(
+            [
+                "if command -v python3 >/dev/null 2>&1; then",
+                '  echo "==> Installing Python packages"',
+            ]
+        )
+        lines.extend(_shell_lines("  python3 -m pip install", python_packages, indent="    "))
+        lines.extend(["fi", ""])
+
+    node_packages = list(packages.get("node_global", []))
+    if node_packages:
+        lines.extend(
+            [
+                "if command -v npm >/dev/null 2>&1; then",
+                '  echo "==> Installing npm global packages"',
+            ]
+        )
+        lines.extend(_shell_lines("  npm install -g", node_packages, indent="    "))
+        lines.extend(["fi", ""])
+
+    cargo_packages = list(packages.get("cargo", []))
+    if cargo_packages:
+        lines.extend(
+            [
+                "if command -v cargo >/dev/null 2>&1; then",
+                '  echo "==> Installing cargo packages"',
+            ]
+        )
+        for package in cargo_packages:
+            lines.append(f"  cargo install {shlex.quote(package)}")
+        lines.extend(["fi", ""])
+
+    brew_formulae = list(packages.get("brew_formulae", []))
+    if brew_formulae:
+        lines.extend(
+            [
+                "if command -v brew >/dev/null 2>&1; then",
+                '  echo "==> Installing Homebrew formulae"',
+            ]
+        )
+        lines.extend(_shell_lines("  brew install", brew_formulae, indent="    "))
+        lines.extend(["fi", ""])
+
+    brew_casks = list(packages.get("brew_casks", []))
+    if brew_casks:
+        lines.extend(
+            [
+                "if command -v brew >/dev/null 2>&1; then",
+                '  echo "==> Installing Homebrew casks"',
+            ]
+        )
+        lines.extend(_shell_lines("  brew install --cask", brew_casks, indent="    "))
+        lines.extend(["fi", ""])
+
+    snap_packages = list(packages.get("snap", []))
+    if snap_packages:
+        lines.extend(
+            [
+                "if command -v snap >/dev/null 2>&1; then",
+                '  echo "==> Installing snap packages"',
+            ]
+        )
+        for package in snap_packages:
+            lines.append(f"  sudo snap install {shlex.quote(package)}")
+        lines.extend(["fi", ""])
+
+    flatpak_apps = list(packages.get("flatpak", []))
+    if flatpak_apps:
+        lines.extend(
+            [
+                "if command -v flatpak >/dev/null 2>&1; then",
+                '  echo "==> Installing Flatpak apps"',
+            ]
+        )
+        for app in flatpak_apps:
+            lines.append(f"  flatpak install -y flathub {shlex.quote(app)}")
+        lines.extend(["fi", ""])
+
+    if vscode_extensions:
+        lines.extend(
+            [
+                "if command -v code >/dev/null 2>&1; then",
+                '  echo "==> Installing VS Code extensions"',
+            ]
+        )
+        for extension in vscode_extensions:
+            lines.append(f"  code --install-extension {shlex.quote(extension)} || true")
+        lines.extend(["fi", ""])
+
+    if git_config:
+        lines.extend(['echo "==> Restoring git global config"'])
+        for key, value in git_config.items():
+            lines.append(f"git config --global {shlex.quote(key)} {shlex.quote(value)}")
+        lines.append("")
+
+    if public_keys:
+        lines.extend(
+            [
+                'echo "==> Restoring SSH public keys"',
+                "mkdir -p ~/.ssh",
+                "chmod 700 ~/.ssh",
+            ]
+        )
+        for item in public_keys:
+            path = Path(str(item.get("path") or "~/.ssh/id_imported.pub"))
+            target = "~/.ssh/" + path.name
+            lines.extend(
+                [
+                    f"cat <<'OMNI_KEY_{path.name.replace('.', '_')}' > {target}",
+                    str(item.get("content") or ""),
+                    f"OMNI_KEY_{path.name.replace('.', '_')}",
+                    f"chmod 644 {target}",
+                ]
+            )
+        lines.append("")
+
+    if dotfiles:
+        lines.append('echo "==> Restoring dotfiles"')
+        for item in dotfiles:
+            name = str(item.get("name") or Path(str(item.get("path") or "")).name)
+            marker = "OMNI_DOTFILE_" + name.replace(".", "_").replace("-", "_")
+            target = "~/" + name
+            lines.extend(
+                [
+                    f"cat <<'{marker}' > {target}",
+                    str(item.get("content") or ""),
+                    marker,
+                ]
+            )
+        lines.append("")
+
+    if crontab_lines:
+        marker = "OMNI_CRONTAB"
+        lines.extend(
+            [
+                'echo "==> Restoring user crontab"',
+                f"cat <<'{marker}' | crontab -",
+            ]
+        )
+        lines.extend(str(line) for line in crontab_lines)
+        lines.extend([marker, ""])
+
+    lines.extend(
+        [
+            'echo "==> Restore bootstrap finished"',
+            'echo "Next: run omni restore or omni migrate sync plan on this machine."',
+            "",
+        ]
+    )
+    return "\n".join(lines)

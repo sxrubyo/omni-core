@@ -18,18 +18,22 @@ class BriefcaseCliTests(unittest.TestCase):
             home_root = tmp_root / "home" / "ubuntu"
             manifest_path = tmp_root / "config" / "system_manifest.json"
             briefcase_path = tmp_root / "briefcase.json"
+            restore_script_path = tmp_root / "briefcase.restore.sh"
             restore_plan_path = tmp_root / "restore-plan.json"
 
             (home_root / "omni-core").mkdir(parents=True)
             (home_root / "omni-core" / "README.md").write_text("omni\n", encoding="utf-8")
             (home_root / ".ssh").mkdir()
             (home_root / ".ssh" / "id_ed25519").write_text("PRIVATE\n", encoding="utf-8")
+            (home_root / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAATEST omni@test\n", encoding="utf-8")
+            (home_root / ".bashrc").write_text("export OMNI=1\n", encoding="utf-8")
 
             briefcase = subprocess.run(
                 [
                     "python3",
                     str(CLI_PATH),
                     "briefcase",
+                    "--full",
                     "--manifest",
                     str(manifest_path),
                     "--home-root",
@@ -38,6 +42,8 @@ class BriefcaseCliTests(unittest.TestCase):
                     "full-home",
                     "--output",
                     str(briefcase_path),
+                    "--restore-script",
+                    str(restore_script_path),
                 ],
                 cwd=REPO_ROOT,
                 text=True,
@@ -46,6 +52,7 @@ class BriefcaseCliTests(unittest.TestCase):
             )
             self.assertEqual(briefcase.returncode, 0, msg=briefcase.stderr or briefcase.stdout)
             self.assertTrue(briefcase_path.exists())
+            self.assertTrue(restore_script_path.exists())
 
             restore_plan = subprocess.run(
                 [
@@ -70,8 +77,11 @@ class BriefcaseCliTests(unittest.TestCase):
 
             self.assertEqual(briefcase_payload["kind"], "omni-briefcase")
             self.assertEqual(briefcase_payload["source"]["profile"], "full-home")
+            self.assertIn("full_inventory", briefcase_payload)
+            self.assertIn("packages", briefcase_payload["full_inventory"])
             self.assertEqual(plan_payload["kind"], "omni-restore-plan")
             self.assertTrue(any(step["id"] == "restore-state" for step in plan_payload["steps"]))
+            self.assertIn("set -euo pipefail", restore_script_path.read_text(encoding="utf-8"))
 
     def test_migrate_sync_family_routes_to_briefcase_and_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

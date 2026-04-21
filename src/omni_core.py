@@ -28,7 +28,7 @@ from bundle_ops import (
     latest_or_explicit,
     restore_bundle,
 )
-from briefcase_ops import build_briefcase_manifest, build_restore_plan
+from briefcase_ops import build_briefcase_manifest, build_restore_plan, build_restore_script
 from agent_ops import env_has_value, get_provider, load_agent_config, provider_catalog, save_agent_config, upsert_env_value
 from bridge_ops import (
     build_host_rewrite_context,
@@ -39,6 +39,7 @@ from bridge_ops import (
 from cli_ux_ops import collect_host_snapshot, render_command_header, render_human_error
 from cleanup_ops import build_purge_plan, execute_purge
 from connect_ops import SSHDestination, probe_remote_host, transfer_payload
+from full_inventory_ops import collect_full_inventory
 from guide_ops import build_guide_entries
 from host_inventory import (
     DEFAULT_PROFILE,
@@ -2304,11 +2305,22 @@ class OmniCore:
         else:
             selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile or FULL_HOME_PROFILE)
             report = scan_home(home_root or manifest.get("host_root") or str(Path.home()), manifest)
-            briefcase = build_briefcase_manifest(manifest, detect_platform_info(), inventory_report=report)
+            effective_home_root = home_root or manifest.get("host_root") or str(Path.home())
+            full_inventory = collect_full_inventory(home_root=effective_home_root)
+            briefcase = build_briefcase_manifest(
+                manifest,
+                detect_platform_info(),
+                inventory_report=report,
+                full_inventory=full_inventory,
+            )
             temp_dir = Path(tempfile.mkdtemp(prefix="omni-connect-"))
             generated = temp_dir / "briefcase.json"
             generated.write_text(json.dumps(briefcase, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             sources.append(str(generated))
+            restore_script = temp_dir / "briefcase.restore.sh"
+            restore_script.write_text(build_restore_script(briefcase, fresh_server=bool(remote.get("fresh_server"))), encoding="utf-8")
+            restore_script.chmod(0o755)
+            sources.append(str(restore_script))
             dim(f"Briefcase generado desde {selected_path}")
 
         latest_state = latest_or_explicit(self.bundle_dir, "", "state_bundle")
@@ -2999,15 +3011,27 @@ class OmniCore:
             }
             self.write_json_output(payload, output)
 
-    def show_briefcase(self, manifest_path: str = "", home_root: str = "", output: str = "", profile: str = ""):
+    def show_briefcase(
+        self,
+        manifest_path: str = "",
+        home_root: str = "",
+        output: str = "",
+        profile: str = "",
+        *,
+        full: bool = False,
+        restore_script_output: str = "",
+    ):
         print_logo(compact=True)
         section("Portable Briefcase")
         selected_path, manifest = self.resolve_manifest(manifest_path, home_root, create=True, profile=profile)
-        report = scan_home(home_root or manifest.get("host_root") or str(Path.home()), manifest)
+        effective_home_root = home_root or manifest.get("host_root") or str(Path.home())
+        report = scan_home(effective_home_root, manifest)
+        full_inventory = collect_full_inventory(home_root=effective_home_root) if full else None
         briefcase = build_briefcase_manifest(
             manifest,
             detect_platform_info(),
             inventory_report=report,
+            full_inventory=full_inventory,
         )
 
         summary = briefcase["inventory"]["summary"]
@@ -3019,11 +3043,25 @@ class OmniCore:
         kv("Secret Paths", str(summary["included_secret_count"]), color=C.YLW if summary["included_secret_count"] else C.GRN)
         kv("Products", str(summary["discovered_product_count"]), color=C.GRN)
         kv("Noise", str(summary["discovered_noise_count"]), color=C.YLW if summary["discovered_noise_count"] else C.GRN)
+        if full_inventory:
+            counts = full_inventory.get("counts") or {}
+            kv("System Packages", str(counts.get("system_packages", 0)), color=C.GRN)
+            kv("Python Packages", str(counts.get("python_packages", 0)), color=C.GRN)
+            kv("Node Global", str(counts.get("node_global_packages", 0)), color=C.GRN)
+            kv("VS Code Ext", str(counts.get("vscode_extensions", 0)), color=C.GRN)
         nl()
         hint("GitHub queda como metadata/control plane. El payload real debe viajar por SSH/SFTP/rsync.")
 
         if output:
             self.write_json_output(briefcase, output)
+            if full:
+                restore_path = Path(restore_script_output or output).expanduser()
+                if restore_path == Path(output).expanduser():
+                    restore_path = restore_path.with_name(restore_path.stem + ".restore.sh")
+                restore_path.parent.mkdir(parents=True, exist_ok=True)
+                restore_path.write_text(build_restore_script(briefcase, fresh_server=True), encoding="utf-8")
+                restore_path.chmod(0o755)
+                ok(f"Restore script saved to {restore_path}")
             return
         print(json.dumps(briefcase, indent=2, ensure_ascii=False))
 
@@ -3086,6 +3124,8 @@ class OmniCore:
         accept_all: bool = False,
         target_root: str = "/",
         on_calendar: str = "daily",
+        full: bool = False,
+        restore_script_output: str = "",
     ):
         normalized = (subaction or "").strip().lower()
         if normalized in {"", "help"}:
@@ -3102,7 +3142,14 @@ class OmniCore:
             return
 
         if normalized in {"create", "briefcase"}:
-            self.show_briefcase(manifest_path, home_root, output, profile=profile)
+            self.show_briefcase(
+                manifest_path,
+                home_root,
+                output,
+                profile=profile,
+                full=full,
+                restore_script_output=restore_script_output,
+            )
             return
         if normalized in {"plan", "restore-plan"}:
             self.show_restore_plan(manifest_path, home_root, output, profile=profile, briefcase_path=briefcase_path)
@@ -3523,6 +3570,8 @@ def main():
     parser.add_argument("--skip-rewrite", action="store_true", help="Skip automatic host reference rewrite during migrate")
     parser.add_argument("--dest", type=str, default="", help="Remote destination for bridge send")
     parser.add_argument("--briefcase", type=str, default="", help="Path to an exported briefcase JSON")
+    parser.add_argument("--restore-script", type=str, default="", help="Path for the generated restore shell script")
+    parser.add_argument("--full", action="store_true", help="Capture the full maleta inventory and emit a restore script")
     parser.add_argument("--host", type=str, default="", help="SSH destination host for omni connect")
     parser.add_argument("--user", type=str, default="", help="SSH user for omni connect")
     parser.add_argument("--port", type=int, default=22, help="SSH port for omni connect")
@@ -3647,6 +3696,8 @@ def main():
                     accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ),
                     target_root=args.target_root,
                     on_calendar=args.on_calendar,
+                    full=args.full,
+                    restore_script_output=args.restore_script,
                 )
                 return
             core.migrate_host_cmd(
@@ -3703,7 +3754,14 @@ def main():
         elif action == "inventory":
             core.show_inventory(args.manifest, args.home_root, args.output, profile=args.profile)
         elif action == "briefcase":
-            core.show_briefcase(args.manifest, args.home_root, args.output, profile=args.profile)
+            core.show_briefcase(
+                args.manifest,
+                args.home_root,
+                args.output,
+                profile=args.profile,
+                full=args.full,
+                restore_script_output=args.restore_script,
+            )
         elif action == "restore-plan":
             core.show_restore_plan(args.manifest, args.home_root, args.output, profile=args.profile, briefcase_path=args.briefcase)
         elif action == "bundle-create":

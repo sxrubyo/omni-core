@@ -8,7 +8,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from briefcase_ops import build_briefcase_manifest, build_restore_plan  # noqa: E402
+from briefcase_ops import build_briefcase_manifest, build_restore_plan, build_restore_script  # noqa: E402
 from platform_ops import PlatformInfo  # noqa: E402
 
 
@@ -137,6 +137,37 @@ class BriefcaseOpsTests(unittest.TestCase):
         self.assertEqual(compose_step["status"], "manual")
         self.assertTrue(any("Cross-platform restore detected" in gap for gap in plan["capability_gaps"]))
         self.assertTrue(any("source uses apt-get, target uses winget" in gap for gap in plan["capability_gaps"]))
+
+    def test_build_restore_script_includes_package_installs_and_dotfiles(self):
+        briefcase = {
+            "inventory": {
+                "packages": {
+                    "system": ["git", "rsync"],
+                    "python": ["rich==15.0.0"],
+                    "node_global": ["pm2"],
+                    "cargo": ["ripgrep"],
+                    "snap": ["lxd"],
+                }
+            },
+            "full_inventory": {
+                "git": {"global_config": {"user.name": "Omni"}},
+                "ssh": {"public_keys": [{"path": "/home/ubuntu/.ssh/id_ed25519.pub", "content": "ssh-ed25519 AAAATEST omni@test"}]},
+                "dotfiles": [{"name": ".bashrc", "path": "/home/ubuntu/.bashrc", "content": "export TEST=1\n"}],
+                "cron": {"user": ["0 * * * * /usr/bin/true"]},
+                "vscode_extensions": ["ms-python.python"],
+            },
+        }
+
+        script = build_restore_script(briefcase, fresh_server=True)
+
+        self.assertIn("sudo apt-get update", script)
+        self.assertIn("python3 -m pip install", script)
+        self.assertIn("npm install -g", script)
+        self.assertIn("cargo install ripgrep", script)
+        self.assertIn("code --install-extension ms-python.python", script)
+        self.assertIn("git config --global user.name Omni", script)
+        self.assertIn("cat <<'OMNI_DOTFILE__bashrc' > ~/.bashrc", script)
+        self.assertIn("cat <<'OMNI_CRONTAB' | crontab -", script)
 
 
 if __name__ == "__main__":
