@@ -56,7 +56,7 @@ from cli_ux_ops import (
     render_human_error,
 )
 from cleanup_ops import build_purge_plan, execute_purge
-from connect_ops import SSHDestination, probe_remote_host, transfer_payload
+from connect_ops import SSHDestination, normalize_remote_system, probe_remote_host, transfer_payload
 from full_inventory_ops import collect_full_inventory
 from github_ops import (
     GitHubTarget,
@@ -2746,6 +2746,9 @@ class OmniCore:
         key_path: str = "",
         remote_path: str = "",
         transport: str = "rsync",
+        target_system: str = "",
+        auth_mode: str = "",
+        password_env: str = "OMNI_SSH_PASSWORD",
         briefcase_path: str = "",
         manifest_path: str = "",
         home_root: str = "",
@@ -2758,7 +2761,25 @@ class OmniCore:
             dry_run=self.is_dry_run(),
             snapshot=self.host_snapshot,
         )
-        section("Remote Connection")
+        section("Conexión remota")
+
+        resolved_target_system = normalize_remote_system(target_system)
+        if self.is_interactive() and not target_system:
+            system_options = [
+                ("auto", "Auto detect", "Prueba Unix primero y luego Windows/OpenSSH si hace falta."),
+                ("posix", "Linux / macOS / WSL", "Usa un probe POSIX y prioriza rsync cuando existe."),
+                ("windows", "Windows / PowerShell", "Usa un probe PowerShell y prioriza SFTP para no asumir rsync."),
+            ]
+            selected_system = select_menu(
+                [title for _, title, _ in system_options],
+                title="¿Qué sistema operativo tiene el host destino?",
+                descriptions=[description for _, _, description in system_options],
+                icons=["🛰️", "🐧", "🪟"],
+                default=0,
+                show_index=True,
+                footer="↑/↓ elegir host remoto · Enter confirmar · número salto directo",
+            )
+            resolved_target_system = system_options[selected_system][0]
 
         resolved_host = host or self.prompt_text("Destino SSH (host o IP)", "")
         resolved_user = user or self.prompt_text("Usuario SSH", getpass.getuser())
@@ -2769,7 +2790,83 @@ class OmniCore:
                 resolved_port = int(raw_port)
             except ValueError:
                 resolved_port = int(port or 22)
-        resolved_key_path = key_path or self.prompt_text("Ruta de clave SSH", "")
+
+        resolved_auth_mode = str(auth_mode or ("key" if key_path else "agent")).strip().lower()
+        if self.is_interactive() and not auth_mode and not key_path:
+            auth_options = [
+                ("agent", "SSH Agent / clave cargada", "Usa la clave ya cargada en ssh-agent o el método por defecto del host."),
+                ("key", "Ruta a clave privada", "Pide una ruta local a `id_ed25519`, `id_rsa` u otra clave privada."),
+                ("password", "Contraseña", "Usa contraseña solo si el host no acepta agent o clave privada."),
+            ]
+            selected_auth = select_menu(
+                [title for _, title, _ in auth_options],
+                title="¿Cómo quieres autenticarte contra el host remoto?",
+                descriptions=[description for _, _, description in auth_options],
+                icons=["🗝️", "🔐", "🔑"],
+                default=0,
+                show_index=True,
+                footer="↑/↓ elegir autenticación · Enter confirmar · número salto directo",
+            )
+            resolved_auth_mode = auth_options[selected_auth][0]
+
+        default_key = ""
+        for candidate in (Path.home() / ".ssh" / "id_ed25519", Path.home() / ".ssh" / "id_rsa"):
+            if candidate.exists():
+                default_key = str(candidate)
+                break
+
+        resolved_key_path = str(Path(key_path).expanduser()) if key_path else ""
+        resolved_password = os.environ.get(password_env, "").strip() if password_env else ""
+
+        if resolved_auth_mode == "key":
+            if not resolved_key_path:
+                resolved_key_path = self.prompt_text("Ruta de clave SSH", default_key)
+            key_file = Path(resolved_key_path).expanduser()
+            if not key_file.exists() or key_file.is_dir():
+                render_human_error(
+                    "La ruta indicada no parece una clave privada SSH válida.",
+                    suggestion="Si ibas a escribir una contraseña, vuelve a elegir `Contraseña`. Si usarás ssh-agent, elige `SSH Agent / clave cargada`.",
+                )
+                return
+            resolved_key_path = str(key_file)
+        elif resolved_auth_mode == "password":
+            if not resolved_password and self.is_interactive():
+                try:
+                    resolved_password = getpass.getpass("Contraseña SSH: ").strip()
+                except KeyboardInterrupt:
+                    print()
+                    raise
+            if not resolved_password:
+                render_human_error(
+                    "No recibí una contraseña SSH para el modo password.",
+                    suggestion=f"Exporta `{password_env}` o usa `SSH Agent / clave cargada`.",
+                )
+                return
+            resolved_key_path = ""
+        else:
+            resolved_auth_mode = "agent"
+            resolved_key_path = ""
+
+        requested_transport = str(transport or "").strip().lower()
+        if requested_transport not in {"rsync", "sftp", "auto"}:
+            requested_transport = "auto"
+        resolved_transport = requested_transport or ("sftp" if resolved_target_system == "windows" else "auto")
+        if self.is_interactive() and transport.lower().strip() not in {"rsync", "sftp", "auto"}:
+            transport_options = [
+                ("auto", "Auto", "Elige rsync en hosts Unix y SFTP en Windows cuando convenga."),
+                ("rsync", "rsync", "Más rápido para Unix cuando rsync existe en ambos extremos."),
+                ("sftp", "SFTP", "Más compatible, especialmente en Windows/OpenSSH."),
+            ]
+            selected_transport = select_menu(
+                [title for _, title, _ in transport_options],
+                title="¿Qué transporte quieres usar para mover la maleta?",
+                descriptions=[description for _, _, description in transport_options],
+                icons=["🧭", "🚀", "📦"],
+                default=0 if resolved_target_system != "windows" else 2,
+                show_index=True,
+                footer="↑/↓ elegir transporte · Enter confirmar · número salto directo",
+            )
+            resolved_transport = transport_options[selected_transport][0]
 
         if not resolved_host:
             render_human_error(
@@ -2783,12 +2880,19 @@ class OmniCore:
             user=resolved_user or getpass.getuser(),
             port=resolved_port,
             key_path=resolved_key_path,
+            auth_mode=resolved_auth_mode,
+            password=resolved_password,
+            target_system=resolved_target_system,
         )
         kv("Target", target.target(), color=C.GRN)
-        kv("Transport", transport, color=C.GRN)
+        kv("Remote OS", resolved_target_system or "auto", color=C.GRN)
+        kv("Transport", resolved_transport, color=C.GRN)
         kv("Remote Path", remote_path or "~/omni-transfer", color=C.GRN)
+        kv("Auth", resolved_auth_mode, color=C.GRN)
         if target.key_path:
             kv("Identity", target.key_path, color=C.GRN)
+        elif resolved_auth_mode == "password":
+            kv("Identity", f"password via {password_env}", color=C.GRN)
         nl()
 
         if self.is_dry_run():
@@ -2797,25 +2901,25 @@ class OmniCore:
 
         try:
             with Spinner("Sondeando host remoto...", color=C.PRIMARY) as spinner:
-                remote = probe_remote_host(target)
+                remote = probe_remote_host(target, timeout=12 if resolved_target_system == "auto" else 20)
                 spinner.finish("Host remoto detectado", success=True)
         except Exception as err:
             render_human_error(
                 f"No se pudo inspeccionar el host remoto: {err}",
-                suggestion="Verifica reachability SSH, puerto, usuario y key path.",
+                suggestion="Verifica reachability SSH, SO remoto, puerto, usuario y modo de autenticación. Si el destino es Windows/OpenSSH, selecciona `Windows / PowerShell` y usa SFTP.",
             )
             return
 
-        freshness = "fresh server" if remote.get("fresh_server") else "existing Linux host"
+        freshness = "Servidor limpio" if remote.get("fresh_server") else ("Host Windows existente" if remote.get("system_family") == "windows" else "Host Unix existente")
         render_action_summary(
-            "Remote Host",
+            "Host remoto",
             [
-                f"System: {remote.get('system', 'unknown')}",
-                f"Package manager: {remote.get('package_manager', 'unknown')}",
-                f"Home entries: {remote.get('home_entries', 0)}",
-                f"Git repos: {remote.get('git_repos', 0)}",
-                f"Installed packages: {remote.get('package_count', 0)}",
-                f"Heuristic: {freshness}",
+                f"Sistema: {remote.get('system', 'unknown')}",
+                f"Gestor de paquetes: {remote.get('package_manager', 'unknown')}",
+                f"Entradas en HOME: {remote.get('home_entries', 0)}",
+                f"Repos Git: {remote.get('git_repos', 0)}",
+                f"Paquetes instalados: {remote.get('package_count', 0)}",
+                f"Heurística: {freshness}",
             ],
             accent=C.GRN if remote.get("fresh_server") else C.YLW,
         )
@@ -2857,7 +2961,7 @@ class OmniCore:
                     sources,
                     target,
                     remote_path=remote_path or "~/omni-transfer",
-                    transport=transport,
+                    transport=resolved_transport,
                 )
                 spinner.finish("Transferencia terminada", success=result.get("success", False))
         except Exception as err:
@@ -2875,12 +2979,12 @@ class OmniCore:
             return
 
         render_action_summary(
-            "Payload Sent",
+            "Payload enviado",
             [
-                f"Target: {target.target()}:{remote_path or '~/omni-transfer'}",
-                f"Transport: {result.get('transport', transport)}",
-                f"Files: {len(sources)}",
-                "Next: inicia sesión en el host destino y ejecuta `omni guide` o `omni restore`.",
+                f"Destino: {target.target()}:{remote_path or '~/omni-transfer'}",
+                f"Transporte: {result.get('transport', resolved_transport)}",
+                f"Archivos: {len(sources)}",
+                "Siguiente paso: inicia sesión en el host destino y ejecuta `omni guide` o `omni restore`.",
             ],
             accent=C.GRN,
         )
@@ -4100,6 +4204,9 @@ def main():
     parser.add_argument("--user", type=str, default="", help="SSH user for omni connect")
     parser.add_argument("--port", type=int, default=22, help="SSH port for omni connect")
     parser.add_argument("--key-path", type=str, default="", help="Path to SSH identity file")
+    parser.add_argument("--auth-mode", type=str, default="", help="SSH auth mode for omni connect (agent|key|password)")
+    parser.add_argument("--password-env", type=str, default="OMNI_SSH_PASSWORD", help="Environment variable containing the SSH password")
+    parser.add_argument("--target-system", type=str, default="", help="Remote host family for omni connect (auto|linux|windows|macos|wsl)")
     parser.add_argument("--remote-path", type=str, default="~/omni-transfer", help="Remote directory for payload transfer")
 
     args, remaining = parser.parse_known_args()
@@ -4184,6 +4291,9 @@ def main():
                 user=args.user,
                 port=args.port,
                 key_path=args.key_path,
+                auth_mode=args.auth_mode,
+                password_env=args.password_env,
+                target_system=args.target_system,
                 remote_path=args.remote_path,
                 transport=args.protocol,
                 briefcase_path=args.briefcase,
