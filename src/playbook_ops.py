@@ -5,7 +5,7 @@ from dataclasses import dataclass, asdict
 from typing import List
 
 
-DEFAULT_REPO_URL = "git@github.com:sxrubyo/omni-core.git"
+DEFAULT_REPO_URL = "git@github.com:sxrubyo/omnisync.git"
 DEFAULT_REMOTE_USER = "ubuntu"
 DEFAULT_REF_NAME = "main"
 

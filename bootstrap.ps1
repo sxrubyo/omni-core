@@ -6,7 +6,7 @@ param(
 
     [int]$Port = 22,
 
-    [string]$RepoUrl = "git@github.com:sxrubyo/omni-core.git",
+    [string]$RepoUrl = "git@github.com:sxrubyo/omnisync.git",
 
     [string]$Destination = "",
 

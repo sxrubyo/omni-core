@@ -1,4 +1,4 @@
-# Omni Core - Guía simple desde GitHub
+# OmniSync - Guía simple desde GitHub
 
 Esta guía es para hacerlo sin enredos.
 
@@ -143,12 +143,12 @@ Luego valida:
 gh auth status
 ```
 
-## Paso 4. Clona Omni Core
+## Paso 4. Clona OmniSync
 
 Todavía dentro de Ubuntu, pega esto:
 
 ```bash
-gh repo clone sxrubyo/omni-core "$OMNI_DIR"
+gh repo clone sxrubyo/omnisync "$OMNI_DIR"
 cd "$OMNI_DIR"
 ```
 
@@ -221,7 +221,7 @@ Luego, ya dentro de Ubuntu:
 sudo apt update
 sudo apt install -y git gh
 gh auth login
-gh repo clone sxrubyo/omni-core "$OMNI_DIR"
+gh repo clone sxrubyo/omnisync "$OMNI_DIR"
 cd "$OMNI_DIR"
 chmod +x install.sh bin/omni bootstrap.sh
 ./install.sh --compose --sync --timer

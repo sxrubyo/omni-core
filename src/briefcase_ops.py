@@ -42,7 +42,7 @@ def build_briefcase_manifest(
     *,
     inventory_report: Mapping[str, Any] | None = None,
     full_inventory: Mapping[str, Any] | None = None,
-    repo_slug: str = "sxrubyo/omni-core",
+    repo_slug: str = "sxrubyo/omnisync",
 ) -> dict[str, Any]:
     source_platform = _platform_dict(platform_info)
     payload = dict(full_inventory or {})
@@ -53,7 +53,7 @@ def build_briefcase_manifest(
         "created_at": _utc_now(),
         "product": {
             "name": "omni-migrate-sync",
-            "engine": "omni-core",
+            "engine": "omnisync",
         },
         "source": {
             "profile": str(manifest.get("profile") or "production-clean"),

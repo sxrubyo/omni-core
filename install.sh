@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_SLUG="${OMNI_INSTALL_REPO:-sxrubyo/omni-core}"
+REPO_SLUG="${OMNI_INSTALL_REPO:-sxrubyo/omnisync}"
 ARCHIVE_URL="${OMNI_INSTALL_SOURCE_ARCHIVE:-https://codeload.github.com/${REPO_SLUG}/tar.gz/refs/heads/main}"
 LOCAL_REPO="${OMNI_INSTALL_LOCAL_REPO:-}"
 OMNI_HOME="${OMNI_INSTALL_HOME:-$HOME/.omni}"
@@ -35,27 +35,46 @@ ensure_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
 }
 
+sync_repo_tree() {
+  local source_dir="$1"
+  local target_dir="$2"
+  rsync -a --delete \
+    --exclude '.git' \
+    --exclude '.pytest_cache' \
+    --exclude '__pycache__' \
+    --exclude '.env' \
+    --exclude 'runtime' \
+    --exclude 'home_snapshot' \
+    --exclude 'home_private_snapshot' \
+    --exclude 'logs' \
+    --exclude 'data' \
+    --exclude 'backups' \
+    --exclude 'config/repos.json' \
+    --exclude 'config/servers.json' \
+    --exclude 'config/system_manifest.json' \
+    --exclude 'config/omni_agent.json' \
+    --exclude 'config/omni_agent_activation.txt' \
+    --filter 'P runtime/' \
+    --filter 'P logs/' \
+    --filter 'P data/' \
+    --filter 'P backups/' \
+    --filter 'P home_snapshot/' \
+    --filter 'P home_private_snapshot/' \
+    --filter 'P .env' \
+    --filter 'P config/repos.json' \
+    --filter 'P config/servers.json' \
+    --filter 'P config/system_manifest.json' \
+    --filter 'P config/omni_agent.json' \
+    --filter 'P config/omni_agent_activation.txt' \
+    "$source_dir"/ "$target_dir"/
+}
+
 stage_repo_from_local() {
   local source_repo="$1"
   [ -d "$source_repo" ] || fail "Local repo override not found: $source_repo"
   mkdir -p "$OMNI_HOME"
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete \
-      --exclude '.git' \
-      --exclude '.pytest_cache' \
-      --exclude '__pycache__' \
-      --exclude '.env' \
-      --exclude 'home_snapshot' \
-      --exclude 'home_private_snapshot' \
-      --exclude 'logs' \
-      --exclude 'data' \
-      --exclude 'backups' \
-      --exclude 'config/repos.json' \
-      --exclude 'config/servers.json' \
-      --exclude 'config/system_manifest.json' \
-      --exclude 'config/omni_agent.json' \
-      --exclude 'config/omni_agent_activation.txt' \
-      "$source_repo"/ "$OMNI_HOME"/
+    sync_repo_tree "$source_repo" "$OMNI_HOME"
   else
     cp -a "$source_repo"/. "$OMNI_HOME"/
     rm -rf \
@@ -76,7 +95,7 @@ stage_repo_from_local() {
 }
 
 stage_repo_from_archive() {
-  local archive="$TMP_DIR/omni-core.tgz"
+  local archive="$TMP_DIR/omnisync.tgz"
   local extract_dir="$TMP_DIR/extract"
   mkdir -p "$extract_dir" "$OMNI_HOME"
   curl -fsSL "$ARCHIVE_URL" -o "$archive"
@@ -86,7 +105,7 @@ stage_repo_from_archive() {
   staged_root="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
   [ -n "$staged_root" ] || fail "Could not locate extracted repository root"
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete "$staged_root"/ "$OMNI_HOME"/
+    sync_repo_tree "$staged_root" "$OMNI_HOME"
   else
     cp -a "$staged_root"/. "$OMNI_HOME"/
   fi
@@ -203,7 +222,7 @@ if [ -n "$LOCAL_REPO" ]; then
   stage_repo_from_local "$LOCAL_REPO"
   ok "Repository staged in $OMNI_HOME"
 else
-  say "Downloading Omni Core"
+  say "Downloading OmniSync"
   stage_repo_from_archive
   ok "Repository staged in $OMNI_HOME"
 fi
@@ -229,7 +248,7 @@ ok "Omni CLI is ready"
 
 cat <<EOF
 
-Omni Core installed.
+OmniSync installed.
 Open a new terminal if PATH changes are not visible yet.
 Commands:
   omni

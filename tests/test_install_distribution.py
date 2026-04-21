@@ -46,7 +46,7 @@ class InstallDistributionTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(help_result.returncode, 0, msg=help_result.stderr or help_result.stdout)
-            self.assertIn("Omni Core - Command Reference", help_result.stdout)
+            self.assertIn("OmniSync - Command Reference", help_result.stdout)
 
     def test_install_script_repairs_preexisting_shadowed_omni_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,7 +161,43 @@ class InstallDistributionTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(help_result.returncode, 0, msg=help_result.stderr or help_result.stdout)
-            self.assertIn("Omni Core - Command Reference", help_result.stdout)
+            self.assertIn("OmniSync - Command Reference", help_result.stdout)
+
+    def test_install_script_rerun_preserves_runtime_without_rsync_delete_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            local_bin = home / ".local" / "bin"
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["PATH"] = f"{local_bin}:{env['PATH']}"
+            env["OMNI_INSTALL_LOCAL_REPO"] = str(REPO_ROOT)
+            env["OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP"] = "1"
+
+            first_result = subprocess.run(
+                ["bash", str(INSTALL_SCRIPT)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(first_result.returncode, 0, msg=first_result.stderr or first_result.stdout)
+
+            runtime_site = home / ".omni" / "runtime" / "lib" / "python3.10" / "site-packages" / "demo"
+            runtime_site.mkdir(parents=True, exist_ok=True)
+            (runtime_site / "__init__.py").write_text("demo = True\n", encoding="utf-8")
+
+            second_result = subprocess.run(
+                ["bash", str(INSTALL_SCRIPT)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(second_result.returncode, 0, msg=second_result.stderr or second_result.stdout)
+            combined_output = (second_result.stdout or "") + (second_result.stderr or "")
+            self.assertNotIn("cannot delete non-empty directory", combined_output)
 
 
 if __name__ == "__main__":

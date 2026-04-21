@@ -15,9 +15,9 @@ from github_ops import latest_briefcase_entry, load_global_config, parse_repo_sl
 
 class GitHubOpsTests(unittest.TestCase):
     def test_parse_repo_slug_accepts_owner_repo_and_default_owner(self) -> None:
-        target = parse_repo_slug("sxrubyo/omni-core")
+        target = parse_repo_slug("sxrubyo/omnisync")
         self.assertEqual(target.owner, "sxrubyo")
-        self.assertEqual(target.repo, "omni-core")
+        self.assertEqual(target.repo, "omnisync")
 
         target_default = parse_repo_slug("omni-private", default_owner="sxrubyo")
         self.assertEqual(target_default.slug, "sxrubyo/omni-private")

@@ -60,7 +60,7 @@ def build_headers(token: str, *, accept: str = "application/vnd.github+json") ->
     headers = {
         "Accept": accept,
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "omni-core",
+        "User-Agent": "omnisync",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"

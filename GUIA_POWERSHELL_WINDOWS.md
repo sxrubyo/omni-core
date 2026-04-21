@@ -1,4 +1,4 @@
-# Omni Core - Guía de instalación desde PowerShell
+# OmniSync - Guía de instalación desde PowerShell
 
 Esta guía es para lanzar `omni-core` desde una PC con Windows usando PowerShell, dejando el bootstrap real sobre un host Linux remoto.
 
@@ -53,7 +53,7 @@ En tu PC con Windows:
 
 - PowerShell 7 recomendado
 - `ssh` disponible en la terminal
-- acceso al repo privado `sxrubyo/omni-core`
+- acceso al repo privado `sxrubyo/omnisync`
 - una clave SSH válida para entrar al servidor Linux
 
 En el servidor Linux destino:
@@ -69,7 +69,7 @@ Puedes hacerlo de dos maneras.
 ### Opción A. Clonar el repo privado
 
 ```powershell
-git clone https://github.com/sxrubyo/omni-core.git
+git clone https://github.com/sxrubyo/omnisync.git
 cd .\omni-core
 ```
 
@@ -111,7 +111,7 @@ Si no pasas `-Destination`, el script ahora:
 pwsh .\bootstrap.ps1 `
   -TargetHost IP_DEL_SERVIDOR `
   -User ubuntu `
-  -RepoUrl git@github.com:sxrubyo/omni-core.git `
+  -RepoUrl git@github.com:sxrubyo/omnisync.git `
   -Branch main
 ```
 
@@ -121,7 +121,7 @@ Ejemplo fijando destino manualmente:
 pwsh .\bootstrap.ps1 `
   -TargetHost IP_DEL_SERVIDOR `
   -User ubuntu `
-  -RepoUrl git@github.com:sxrubyo/omni-core.git `
+  -RepoUrl git@github.com:sxrubyo/omnisync.git `
   -Destination /opt/omni-core `
   -Branch main
 ```
@@ -134,7 +134,7 @@ pwsh .\bootstrap.ps1 `
   -User ubuntu `
   -Port 22 `
   -IdentityFile C:\ruta\tu-clave.pem `
-  -RepoUrl git@github.com:sxrubyo/omni-core.git `
+  -RepoUrl git@github.com:sxrubyo/omnisync.git `
   -Destination /opt/omni-core `
   -Branch main `
   -InstallTimer `
@@ -256,7 +256,7 @@ pwsh .\bootstrap.ps1 `
   -TargetHost IP_DEL_SERVIDOR `
   -User ubuntu `
   -IdentityFile C:\ruta\tu-clave.pem `
-  -RepoUrl git@github.com:sxrubyo/omni-core.git `
+  -RepoUrl git@github.com:sxrubyo/omnisync.git `
   -Destination /opt/omni-core `
   -Branch main `
   -InstallTimer

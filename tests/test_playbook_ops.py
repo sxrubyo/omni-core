@@ -43,7 +43,7 @@ class PlaybookOpsTests(unittest.TestCase):
             target_host="ec2-54-160-79-60.compute-1.amazonaws.com",
             remote_user="ubuntu",
             identity_file="C:\\Users\\santi\\Downloads\\llave.pem",
-            repo_url="git@github.com:sxrubyo/omni-core.git",
+            repo_url="git@github.com:sxrubyo/omnisync.git",
             ref_name="main",
             destination="/home/ubuntu/omni-core",
         )

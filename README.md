@@ -1,13 +1,13 @@
-# Omni Core v2.1 - The Supreme Coordinator
+# OmniSync v2.1 - The Supreme Coordinator
 
-Omni Core está orientado a restaurar un entorno productivo limpio en Linux o un `full-home` completo de `/home/ubuntu`, sincronizar estado real desde otros hosts y dejar mantenimiento automático sin arrastrar ruido innecesario.
+OmniSync está orientado a restaurar un entorno productivo limpio en Linux o un `full-home` completo de `/home/ubuntu`, sincronizar estado real desde otros hosts y dejar mantenimiento automático sin arrastrar ruido innecesario.
 
 ## Instalación rápida
 
 Instalación pública recomendada:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sxrubyo/omni-core/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.sh | bash
 ```
 
 Luego:
@@ -119,7 +119,7 @@ Este es el flujo recomendado para una reinstalación real, una migración entre 
 
 ## Qué se preserva
 
-Omni Core trabaja bien cuando se conservan estas piezas:
+OmniSync trabaja bien cuando se conservan estas piezas:
 
 - `config/`
 - `data/`
@@ -219,7 +219,7 @@ Si no quieres complicarte con claves, wrappers ni PowerShell remoto:
 Si ya estás en la máquina destino:
 
 ```bash
-bash bootstrap.sh git@github.com:sxrubyo/omni-core.git /opt/omni-core main
+bash bootstrap.sh git@github.com:sxrubyo/omnisync.git /opt/omni-core main
 ```
 
 Ese flujo:
@@ -235,11 +235,11 @@ Ese flujo:
 Desde otra PC, incluyendo PowerShell en Windows:
 
 ```powershell
-pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omni-core.git -Branch main -InstallTimer
+pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omnisync.git -Branch main -InstallTimer
 Si no pasas `-Destination`, `bootstrap.ps1` escanea el host remoto, recomienda rutas y te deja elegir o escribir una personalizada.
 ```
 
-Ese wrapper se conecta por SSH al host Linux, prepara paquetes base, clona o actualiza Omni Core y dispara el mismo bootstrap de producción.
+Ese wrapper se conecta por SSH al host Linux, prepara paquetes base, clona o actualiza OmniSync y dispara el mismo bootstrap de producción.
 Si agregas `-InstallTimer`, también deja programado el reconcile diario con `systemd`.
 
 Guía dedicada:
@@ -259,7 +259,7 @@ chmod +x install.sh bin/omni bootstrap.sh
 ### 4. GitHub privado
 
 ```bash
-git clone git@github.com:sxrubyo/omni-core.git /opt/omni-core
+git clone git@github.com:sxrubyo/omnisync.git /opt/omni-core
 cd /opt/omni-core
 chmod +x install.sh bin/omni bootstrap.sh
 ./install.sh --compose --sync

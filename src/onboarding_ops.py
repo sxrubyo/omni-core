@@ -136,7 +136,7 @@ def build_start_menu(
     options = build_flow_options(info)
     questions = build_start_questions(info, env=env)
     return {
-        "title": "Omni Core Guided Start",
+        "title": "OmniSync Guided Start",
         "subtitle": "Choose a recovery path. The CLI can guide the first run or run non-interactively.",
         "platform": info.to_dict(),
         "recommended_flow": recommended_start_flow(info, env=env),
@@ -164,7 +164,7 @@ def build_flow_prompt(
     info = platform_info or detect_platform_info(env)
     recommended = recommended_start_flow(info, env=env)
     return (
-        "Omni Core ready.\n"
+        "OmniSync ready.\n"
         f"Detected platform: {info.system} / {info.shell} / {info.package_manager}\n"
         "What do you want to do first?\n"
         "1. Use this machine as a bridge\n"

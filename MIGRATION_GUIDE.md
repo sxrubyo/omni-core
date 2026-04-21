@@ -1,8 +1,8 @@
-# Omni Core - Migration Guide
+# OmniSync - Migration Guide
 
-Repositorio: `sxrubyo/omni-core`
+Repositorio: `sxrubyo/omnisync`
 
-Esta guía describe el flujo productivo limpio recomendado para mover Omni Core entre máquinas, reconstruir un host desde cero y mantener el estado sincronizado sin arrastrar ruido innecesario.
+Esta guía describe el flujo productivo limpio recomendado para mover OmniSync entre máquinas, reconstruir un host desde cero y mantener el estado sincronizado sin arrastrar ruido innecesario.
 
 ## 1. Principio de migración
 
@@ -28,7 +28,7 @@ Debe incluir, como mínimo:
 - `logs/`
 - `tasks.json`
 - manifests de despliegue útiles
-- snapshots de servidores remotos definidos por Omni Core
+- snapshots de servidores remotos definidos por OmniSync
 
 ### Secrets pack
 
@@ -81,13 +81,13 @@ Nunca mezclar con el bundle de estado.
 Usar uno de estos caminos:
 
 ```bash
-bash bootstrap.sh git@github.com:sxrubyo/omni-core.git /opt/omni-core main
+bash bootstrap.sh git@github.com:sxrubyo/omnisync.git /opt/omni-core main
 ```
 
 o desde otra máquina:
 
 ```powershell
-pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omni-core.git -Destination /opt/omni-core -Branch main
+pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omnisync.git -Destination /opt/omni-core -Branch main
 ```
 
 ### Paso 5. Importar bundle y secretos
@@ -121,7 +121,7 @@ El host debe quedar con una tarea programada cada 24 horas para:
 Si el host tiene acceso SSH al repo privado:
 
 ```bash
-git clone git@github.com:sxrubyo/omni-core.git /opt/omni-core
+git clone git@github.com:sxrubyo/omnisync.git /opt/omni-core
 cd /opt/omni-core
 chmod +x install.sh bin/omni bootstrap.sh
 cp .env.example .env
@@ -159,7 +159,7 @@ El archivo `bootstrap.ps1` sirve para lanzar el bootstrap remoto sobre un host L
 Uso típico:
 
 ```powershell
-pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omni-core.git -Destination /opt/omni-core -Branch main -InstallTimer
+pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omnisync.git -Destination /opt/omni-core -Branch main -InstallTimer
 ```
 
 Ese wrapper:
@@ -227,4 +227,4 @@ El mejor flujo para reinstalaciones futuras es:
 5. reconcile
 6. timer diario
 
-Con eso se puede levantar Omni Core en otra máquina sin depender de copiar basura ni de restauraciones manuales una por una.
+Con eso se puede levantar OmniSync en otra máquina sin depender de copiar basura ni de restauraciones manuales una por una.

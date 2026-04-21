@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Omni Core v2.0 - The Supreme Coordinator
+OmniSync v2.0 - The Supreme Coordinator
 Enterprise-grade system orchestration with premium UI.
 2026 Edition.
 """
@@ -865,7 +865,7 @@ def print_logo(tagline=True, compact=False, animated=False, minimal=False):
             ghost_write(tl, color=C.G2, delay=0.01)
         else:
             print("  " + q(C.G2, tl))
-        print("  " + q(C.GLD_BRIGHT, "✦") + " " + q(C.G3, "Omni Core · Enterprise Edition"))
+        print("  " + q(C.GLD_BRIGHT, "✦") + " " + q(C.G3, "OmniSync · Enterprise Edition"))
         hr()
     print()
     sys.stdout.write(C.R)
@@ -1676,7 +1676,7 @@ class OmniCore:
             nl()
 
         info("Watching managed paths for file changes. Ctrl+C to stop.")
-        logger.info("Starting Omni Core watch mode", extra={"interval": interval, "profile": manifest.get("profile")})
+        logger.info("Starting OmniSync watch mode", extra={"interval": interval, "profile": manifest.get("profile")})
 
         try:
             while True:
@@ -2377,7 +2377,7 @@ class OmniCore:
         dim("Menú con flechas, ETA y acceso a Connect / Briefcase / Restore / Agent.")
         nl()
 
-        section("Omni Core - Command Reference")
+        section("OmniSync - Command Reference")
 
         print("  " + q(C.W, "CORE COMMANDS", bold=True))
         nl()
@@ -2469,9 +2469,9 @@ class OmniCore:
 
         hr()
         bullet("Migration: inventory -> bundle -> secrets -> reconcile -> timer", C.G3)
-        bullet("Quickstart: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omni-core/main/install.sh | bash", C.G3)
+        bullet("Quickstart: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.sh | bash", C.G3)
         bullet("Default entrypoint: run `omni` and choose bridge/capture/restore/migrate", C.G3)
-        print("  " + q(C.G3, f"Omni Core v{OMNI_VERSION} '{OMNI_CODENAME}'"))
+        print("  " + q(C.G3, f"OmniSync v{OMNI_VERSION} '{OMNI_CODENAME}'"))
         print("  " + q(C.G3, "Run 'omni <command>' to execute"))
         print()
 
@@ -3437,14 +3437,14 @@ class OmniCore:
     def show_install_guide(self):
         print_logo(tagline=False)
         render_command_header(
-            "Install Omni Core",
+            "Install OmniSync",
             "One-line install and operator-ready first boot",
             dry_run=self.is_dry_run(),
             snapshot=self.host_snapshot,
         )
         render_help_overview()
         section("Portable Install")
-        bullet("1. Linux/macOS/WSL: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omni-core/main/install.sh | bash", C.GRN)
+        bullet("1. Linux/macOS/WSL: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.sh | bash", C.GRN)
         bullet("2. El instalador deja Omni en ~/.omni y el wrapper en ~/.local/bin/omni", C.GRN)
         bullet("3. Ejecuta `omni` o `omni guide` para entrar al flujo guiado", C.GRN)
         bullet("4. Usa `omni connect` para enlazar el host origen con el destino por SSH", C.GRN)
@@ -3853,7 +3853,7 @@ class OmniCore:
         kv("Python", platform.python_version())
         kv("Platform", PLATFORM)
         nl()
-        ok("Omni Core is up to date")
+        ok("OmniSync is up to date")
 
     def show_monitor(self, interval=5):
         """Continuous monitoring mode with live updates."""
@@ -4029,7 +4029,7 @@ logging.basicConfig(
 logger = logging.getLogger("omni.core")
 
 def main():
-    parser = argparse.ArgumentParser(description="Omni Core - The Supreme Coordinator", add_help=False)
+    parser = argparse.ArgumentParser(description="OmniSync - The Supreme Coordinator", add_help=False)
     parser.add_argument("action", nargs="?", default="start", help="Action to perform")
     parser.add_argument("--interval", type=int, default=300, help="Interval for watch mode (seconds)")
     parser.add_argument("--lines", type=int, default=50, help="Number of log lines")

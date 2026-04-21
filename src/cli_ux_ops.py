@@ -208,7 +208,7 @@ def build_help_surface_lines(
     version: str = "",
     codename: str = "",
     tagline: str = "Automation at scale.",
-    edition: str = "Omni Core · Enterprise Edition",
+    edition: str = "OmniSync · Enterprise Edition",
 ) -> list[str]:
     host = str(snapshot.get("system", "unknown"))
     release = str(snapshot.get("release", "unknown"))
@@ -261,7 +261,7 @@ def render_help_surface(
     version: str = "",
     codename: str = "",
     tagline: str = "Automation at scale.",
-    edition: str = "Omni Core · Enterprise Edition",
+    edition: str = "OmniSync · Enterprise Edition",
 ) -> None:
     for line in build_help_surface_lines(
         snapshot,
