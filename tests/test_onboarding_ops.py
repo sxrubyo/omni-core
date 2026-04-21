@@ -66,6 +66,10 @@ class OnboardingOpsTests(unittest.TestCase):
             keys,
             ["connect", "briefcase", "restore", "migrate-sync", "doctor", "agent", "chat", "advanced"],
         )
+        descriptions = {option.key: option.description for option in options}
+        self.assertIn("Restaura el host destino", descriptions["restore"])
+        self.assertIn("Inspecciona salud", descriptions["doctor"])
+        self.assertIn("Configura Omni Agent", descriptions["agent"])
 
     def test_build_start_questions_and_menu_include_guided_choice(self):
         info = PlatformInfo(

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any, Dict
@@ -40,6 +41,10 @@ HELP_STARBURST = [
     "              ·",
     "",
 ]
+
+ANSI_GOLD = "\033[38;5;220m"
+ANSI_FAINT = "\033[38;5;244m"
+ANSI_RESET = "\033[0m"
 
 
 def _memory_snapshot() -> tuple[int, int]:
@@ -234,6 +239,53 @@ def _build_sectioned_surface_box_lines(
     return _build_surface_box_lines(title, rows, width=width)
 
 
+def _surface_box_width(snapshot: Dict[str, Any], *, default: int = 74) -> int:
+    terminal_name = str(snapshot.get("terminal", "")).lower()
+    compact_terminals = ("xterm", "screen", "tmux", "linux", "vt")
+    if any(token in terminal_name for token in compact_terminals):
+        return 66
+    return default
+
+
+def _merge_surface_columns(left_lines: list[str], right_lines: list[str], *, gap: int = 2) -> list[str]:
+    left_width = max(len(line.rstrip()) for line in left_lines)
+    total_lines = max(len(left_lines), len(right_lines))
+    rendered: list[str] = []
+    for idx in range(total_lines):
+        left = left_lines[idx].rstrip() if idx < len(left_lines) else ""
+        right = right_lines[idx] if idx < len(right_lines) else ""
+        if right:
+            rendered.append(left.ljust(left_width + gap) + right)
+        else:
+            rendered.append(left)
+    return rendered
+
+
+def _style_surface_line(line: str) -> str:
+    if not getattr(sys.stdout, "isatty", lambda: False)():
+        return line
+
+    accent_tokens = (
+        "·  ────────── ✦ ──────────  ·",
+        "O  M  N  I",
+        "✦ OmniSync · by Black Boss",
+        "╭ ",
+        "╰",
+        "HOST SNAPSHOT",
+        "QUICKSTART",
+        "OPERATOR MODE",
+        "OMNI CONTROL SURFACE",
+        "OMNI START SURFACE",
+    )
+    muted_tokens = ("Host:", "Shell:", "Pkg:", "CPU:", "RAM:", "Disk:", "Mode:", "Scope:")
+
+    if any(token in line for token in accent_tokens):
+        return f"{ANSI_GOLD}{line}{ANSI_RESET}"
+    if any(token in line for token in muted_tokens):
+        return f"{ANSI_FAINT}{line}{ANSI_RESET}"
+    return line
+
+
 def build_help_surface_lines(
     snapshot: Dict[str, Any],
     tips: list[str],
@@ -279,20 +331,9 @@ def build_help_surface_lines(
                 list(tips),
             ),
         ],
-        width=74,
+        width=_surface_box_width(snapshot, default=74),
     )
-
-    left_width = max(len(line) for line in left_lines)
-    total_lines = max(len(left_lines), len(right_lines))
-    rendered: list[str] = []
-    for idx in range(total_lines):
-        left = left_lines[idx] if idx < len(left_lines) else ""
-        right = right_lines[idx] if idx < len(right_lines) else ""
-        if right:
-            rendered.append(left.ljust(left_width + 4) + right)
-        else:
-            rendered.append(left)
-    return rendered
+    return _merge_surface_columns(left_lines, right_lines, gap=2)
 
 
 def render_help_surface(
@@ -312,7 +353,7 @@ def render_help_surface(
         tagline=tagline,
         edition=edition,
     ):
-        print(f"  {line}".rstrip())
+        print(f"  {_style_surface_line(line)}".rstrip())
 
 
 def build_guided_start_surface_lines(
@@ -321,6 +362,8 @@ def build_guided_start_surface_lines(
     *,
     version: str = "",
     codename: str = "",
+    mode: str = "guided",
+    scope: str = "production-clean",
     tagline: str = "Move a machine without rebuilding it by hand.",
     edition: str = "OmniSync · by Black Boss",
 ) -> list[str]:
@@ -342,7 +385,7 @@ def build_guided_start_surface_lines(
     ]
 
     right_lines = _build_sectioned_surface_box_lines(
-        "Omni Guided Start",
+        "OMNI START SURFACE",
         [
             (
                 "HOST SNAPSHOT",
@@ -353,30 +396,20 @@ def build_guided_start_surface_lines(
                 ],
             ),
             (
-                "START",
+                "OPERATOR MODE",
                 [
-                    "Detect the host, choose the migration path and keep the operator in control.",
+                    f"Mode: {mode}",
+                    f"Scope: {scope}",
                 ],
             ),
             (
-                "OMNI CONTROL SURFACE",
+                "QUICKSTART",
                 list(tips),
             ),
         ],
-        width=74,
+        width=_surface_box_width(snapshot, default=70),
     )
-
-    left_width = max(len(line) for line in left_lines)
-    total_lines = max(len(left_lines), len(right_lines))
-    rendered: list[str] = []
-    for idx in range(total_lines):
-        left = left_lines[idx] if idx < len(left_lines) else ""
-        right = right_lines[idx] if idx < len(right_lines) else ""
-        if right:
-            rendered.append(left.ljust(left_width + 4) + right)
-        else:
-            rendered.append(left)
-    return rendered
+    return _merge_surface_columns(left_lines, right_lines, gap=1)
 
 
 def render_guided_start_surface(
@@ -385,6 +418,8 @@ def render_guided_start_surface(
     *,
     version: str = "",
     codename: str = "",
+    mode: str = "guided",
+    scope: str = "production-clean",
     tagline: str = "Move a machine without rebuilding it by hand.",
     edition: str = "OmniSync · by Black Boss",
 ) -> None:
@@ -393,10 +428,12 @@ def render_guided_start_surface(
         tips,
         version=version,
         codename=codename,
+        mode=mode,
+        scope=scope,
         tagline=tagline,
         edition=edition,
     ):
-        print(f"  {line}".rstrip())
+        print(f"  {_style_surface_line(line)}".rstrip())
 
 
 def render_human_error(

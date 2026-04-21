@@ -44,7 +44,7 @@ class CliUxOpsTests(unittest.TestCase):
         self.assertTrue(any("O  M  N  I" in line for line in lines))
         self.assertTrue(any("Host:" in line for line in lines))
 
-    def test_build_guided_start_surface_lines_places_start_and_control_boxes_beside_brand(self):
+    def test_build_guided_start_surface_lines_uses_single_start_surface_box(self):
         lines = build_guided_start_surface_lines(
             {
                 "system": "linux",
@@ -56,6 +56,7 @@ class CliUxOpsTests(unittest.TestCase):
                 "memory_used_mb": 3200,
                 "disk_total_gb": 100.0,
                 "disk_free_gb": 42.0,
+                "terminal": "xterm-256color",
             },
             [
                 "Quickstart: omni",
@@ -63,12 +64,40 @@ class CliUxOpsTests(unittest.TestCase):
             ],
             version="2.1.0",
             codename="Titan",
+            mode="guided",
+            scope="production-clean",
         )
-        self.assertTrue(any("Omni Guided Start" in line for line in lines))
-        self.assertTrue(any("OMNI CONTROL SURFACE" in line for line in lines))
-        self.assertTrue(any("START" in line for line in lines))
+        self.assertTrue(any("OMNI START SURFACE" in line for line in lines))
+        self.assertTrue(any("OPERATOR MODE" in line for line in lines))
+        self.assertTrue(any("QUICKSTART" in line for line in lines))
         self.assertTrue(any("v2.1.0" in line for line in lines))
         self.assertTrue(any("Host:" in line for line in lines))
+        self.assertTrue(any("Mode: guided" in line for line in lines))
+        self.assertTrue(any("Scope: production-clean" in line for line in lines))
+
+    def test_build_guided_start_surface_lines_uses_compact_gap_for_terminals(self):
+        lines = build_guided_start_surface_lines(
+            {
+                "system": "linux",
+                "release": "6.8.0-1051-aws",
+                "shell": "bash",
+                "package_manager": "apt-get",
+                "cpu_cores": 2,
+                "memory_total_mb": 7780,
+                "memory_used_mb": 3866,
+                "disk_total_gb": 96.7,
+                "disk_free_gb": 21.3,
+                "terminal": "xterm-256color",
+            },
+            [],
+            version="2.1.0",
+            codename="Titan",
+            mode="guided",
+            scope="production-clean",
+        )
+        guided_line = next(line for line in lines if "╭ OMNI START SURFACE" in line)
+        box_start = guided_line.index("╭ OMNI START SURFACE")
+        self.assertLessEqual(len(guided_line[box_start:]), 70)
 
 
 if __name__ == "__main__":

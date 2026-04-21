@@ -479,13 +479,14 @@ def select_menu(
     current = default
     scroll_offset = 0
     digit_buffer = ""
+    rendered_line_count = 0
 
     def footer_text() -> str:
         base = footer or "↑/↓ seleccionar · j/k mover · Enter confirmar · número salto directo"
         return f"{base} · salto: {digit_buffer}" if digit_buffer else base
 
     def draw(first: bool = False) -> None:
-        nonlocal scroll_offset
+        nonlocal rendered_line_count, scroll_offset
         if current < scroll_offset:
             scroll_offset = current
         elif current >= scroll_offset + page_size:
@@ -493,14 +494,18 @@ def select_menu(
 
         visible = range(scroll_offset, min(len(options), scroll_offset + page_size))
         out: List[str] = []
-        if not first:
-            out.append("\033[u\033[J")
-        else:
-            out.append("\033[s")
+        if not first and rendered_line_count:
+            out.append(f"\033[{rendered_line_count}F")
+            for _ in range(rendered_line_count):
+                out.append("\033[2K")
+                out.append("\033[1E")
+            out.append(f"\033[{rendered_line_count}F")
 
+        line_count = 0
         if title:
             out.append("\n  " + q(C.G2, title) + "\n")
             out.append("  " + q(C.G3, "Usa ↑/↓ y Enter. También puedes saltar con un número.") + "\n\n")
+            line_count += 4
 
         for idx in visible:
             prefix = q(C.PRIMARY, f"{idx + 1}.", bold=True) + "  " if show_index else ""
@@ -509,17 +514,23 @@ def select_menu(
                 out.append("  " + q(C.B6, "▸", bold=True) + "  " + prefix + icon + q(C.W, options[idx], bold=True) + "\n")
             else:
                 out.append("     " + prefix + icon + q(C.G2, options[idx]) + "\n")
+            line_count += 1
 
             if idx < len(descriptions) and descriptions[idx]:
                 out.append("       " + q(C.G2 if idx == current else C.G3, descriptions[idx]) + "\n")
+                line_count += 1
 
         if scroll_offset > 0:
             out.append("       " + q(C.G3, "↑ hay más arriba") + "\n")
+            line_count += 1
         if scroll_offset + page_size < len(options):
             out.append("       " + q(C.G3, "↓ hay más abajo") + "\n")
+            line_count += 1
 
         out.append("\n")
         out.append("  " + q(C.G3, footer_text()) + "\n")
+        line_count += 2
+        rendered_line_count = line_count
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -2603,17 +2614,15 @@ class OmniCore:
             [
                 "Quickstart: omni  |  omni guide  |  omni connect --host <ip> --user <user>",
                 "Maleta portable: omni briefcase --full --output ~/briefcase.json",
-                "Migration path: SSH Connect -> Maleta -> Restore -> Migrate Sync",
-                "Keep secrets out of git: tokens and SSH material stay in the encrypted bundle.",
+                "Ruta recomendada: SSH Connect -> Maleta -> Restore -> Migrate Sync",
+                "Secretos fuera de git: tokens y material SSH se quedan en el bundle cifrado.",
             ],
             version=OMNI_VERSION,
             codename=OMNI_CODENAME,
+            mode="accept-all" if effective_accept_all else "guided",
+            scope=profile,
         )
         print()
-        section("Guided Start")
-        kv("Detected Platform", f"{info_obj.system} / {info_obj.shell} / {info_obj.package_manager}", color=C.GRN)
-        kv("Mode", "accept-all" if effective_accept_all else "guided", color=C.YLW if effective_accept_all else C.GRN)
-        kv("Default Scope", profile, color=C.GRN)
         scan_root = str(Path.home())
         if self.manifest_path.exists():
             try:
