@@ -11,9 +11,23 @@ from pathlib import Path
 
 REPO_ROOT = Path("/home/ubuntu/omni-core")
 INSTALL_SCRIPT = REPO_ROOT / "install.sh"
+POWERSHELL_INSTALL_SCRIPT = REPO_ROOT / "install.ps1"
+README = REPO_ROOT / "README.md"
 
 
 class InstallDistributionTests(unittest.TestCase):
+    def test_windows_install_script_exists_with_public_entrypoint(self) -> None:
+        self.assertTrue(POWERSHELL_INSTALL_SCRIPT.exists())
+        contents = POWERSHELL_INSTALL_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("https://github.com/$RepoSlug/archive/refs/heads/main.zip", contents)
+        self.assertIn("omni.cmd", contents)
+        self.assertIn("Get-Command omni", contents)
+
+    def test_readme_mentions_windows_install_command(self) -> None:
+        contents = README.read_text(encoding="utf-8")
+        self.assertIn("install.ps1 | iex", contents)
+        self.assertIn("npm install -g omnisync", contents)
+
     def test_repo_does_not_track_snapshot_payloads(self) -> None:
         result = subprocess.run(
             ["git", "ls-files", "home_snapshot", "home_private_snapshot"],

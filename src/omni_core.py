@@ -3464,11 +3464,13 @@ class OmniCore:
         render_help_overview()
         section("Portable Install")
         bullet("1. Linux/macOS/WSL: curl -fsSL https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.sh | bash", C.GRN)
-        bullet("2. El instalador deja Omni en ~/.omni y el wrapper en ~/.local/bin/omni", C.GRN)
-        bullet("3. Ejecuta `omni` o `omni guide` para entrar al flujo guiado", C.GRN)
-        bullet("4. Usa `omni connect` para enlazar el host origen con el destino por SSH", C.GRN)
-        bullet("5. Usa `omni briefcase --full` para generar maleta + restore script", C.GRN)
-        bullet("6. Usa `omni restore` o `omni migrate sync restore` en el destino", C.GRN)
+        bullet("2. PowerShell: irm https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.ps1 | iex", C.GRN)
+        bullet("3. npm global: npm install -g omnisync", C.GRN)
+        bullet("4. El instalador deja Omni en ~/.omni y el wrapper en ~/.local/bin/omni", C.GRN)
+        bullet("5. Ejecuta `omni` o `omni guide` para entrar al flujo guiado", C.GRN)
+        bullet("6. Usa `omni connect` para enlazar el host origen con el destino por SSH", C.GRN)
+        bullet("7. Usa `omni briefcase --full` para generar maleta + restore script", C.GRN)
+        bullet("8. Usa `omni restore` o `omni migrate sync restore` en el destino", C.GRN)
         nl()
 
     def show_inventory(self, manifest_path: str = "", home_root: str = "", output: str = "", profile: str = ""):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import textwrap
 from pathlib import Path
 from typing import Any, Dict
 
@@ -192,13 +193,45 @@ def _fit_cell(text: str, width: int) -> str:
     return value[: width - 1] + "…"
 
 
+def _expand_surface_rows(rows: list[str], inner: int) -> list[str]:
+    expanded: list[str] = []
+    for row in rows:
+        value = str(row or "")
+        if not value:
+            expanded.append("")
+            continue
+        wrapped = textwrap.wrap(
+            value,
+            width=inner,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        expanded.extend(wrapped or [value[:inner]])
+    return expanded
+
+
 def _build_surface_box_lines(title: str, rows: list[str], width: int = 76) -> list[str]:
     inner = max(24, width - 2)
     label = f" {title} "
     top = "╭" + label + "─" * max(0, inner - len(label)) + "╮"
-    body = [f"│{_fit_cell(row, inner)}│" for row in rows]
+    body = [f"│{_fit_cell(row, inner)}│" for row in _expand_surface_rows(rows, inner)]
     bottom = "╰" + "─" * inner + "╯"
     return [top] + body + [bottom]
+
+
+def _build_sectioned_surface_box_lines(
+    title: str,
+    sections: list[tuple[str, list[str]]],
+    *,
+    width: int = 76,
+) -> list[str]:
+    rows: list[str] = []
+    for index, (heading, values) in enumerate(sections):
+        if index:
+            rows.append("")
+        rows.append(heading)
+        rows.extend(values)
+    return _build_surface_box_lines(title, rows, width=width)
 
 
 def build_help_surface_lines(
@@ -225,28 +258,36 @@ def build_help_surface_lines(
         "",
         f"  {tagline}",
         f"  ✦ {edition}",
-        "  ──────────────────────────────────────────────────────────────",
     ]
 
-    box_rows = [
-        f"Host: {host} {release}",
-        f"Shell: {shell}",
-        f"Pkg: {package_manager}",
-        f"CPU: {cpu_cores} cores",
-        f"RAM: {memory}",
-        f"Disk: {disk}",
-        "",
-    ] + list(tips)
-    right_lines = _build_surface_box_lines("OMNI CONTROL SURFACE", box_rows, width=78)
+    right_lines = _build_sectioned_surface_box_lines(
+        "OMNI CONTROL SURFACE",
+        [
+            (
+                "HOST SNAPSHOT",
+                [
+                    f"Host: {host} {release}",
+                    f"Shell: {shell}",
+                    f"Pkg: {package_manager}",
+                    f"CPU: {cpu_cores} cores",
+                    f"RAM: {memory}",
+                    f"Disk: {disk}",
+                ],
+            ),
+            (
+                "QUICKSTART",
+                list(tips),
+            ),
+        ],
+        width=74,
+    )
 
     left_width = max(len(line) for line in left_lines)
-    right_offset = len(HELP_STARBURST)
-    total_lines = max(len(left_lines), right_offset + len(right_lines))
+    total_lines = max(len(left_lines), len(right_lines))
     rendered: list[str] = []
     for idx in range(total_lines):
         left = left_lines[idx] if idx < len(left_lines) else ""
-        right_idx = idx - right_offset
-        right = right_lines[right_idx] if 0 <= right_idx < len(right_lines) else ""
+        right = right_lines[idx] if idx < len(right_lines) else ""
         if right:
             rendered.append(left.ljust(left_width + 4) + right)
         else:
@@ -298,21 +339,31 @@ def build_guided_start_surface_lines(
         "",
         f"  {tagline}",
         f"  ✦ {edition}",
-        "  ──────────────────────────────────────────────────────────────",
     ]
 
-    guided_rows = [
-        f"Host: {host} {release}  ·  Shell: {shell}",
-        f"Pkg: {package_manager}  ·  CPU: {cpu_cores} cores",
-        f"RAM: {memory}  ·  Disk: {disk}",
-        "",
-        "Detect the host, choose the migration path",
-        "and keep the operator in control.",
-    ]
-    right_lines = (
-        _build_surface_box_lines("Omni Guided Start", guided_rows, width=78)
-        + [""]
-        + _build_surface_box_lines("OMNI CONTROL SURFACE", tips, width=78)
+    right_lines = _build_sectioned_surface_box_lines(
+        "Omni Guided Start",
+        [
+            (
+                "HOST SNAPSHOT",
+                [
+                    f"Host: {host} {release}  ·  Shell: {shell}",
+                    f"Pkg: {package_manager}  ·  CPU: {cpu_cores} cores",
+                    f"RAM: {memory}  ·  Disk: {disk}",
+                ],
+            ),
+            (
+                "START",
+                [
+                    "Detect the host, choose the migration path and keep the operator in control.",
+                ],
+            ),
+            (
+                "OMNI CONTROL SURFACE",
+                list(tips),
+            ),
+        ],
+        width=74,
     )
 
     left_width = max(len(line) for line in left_lines)

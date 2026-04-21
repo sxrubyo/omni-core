@@ -108,9 +108,9 @@ class OnboardingOpsTests(unittest.TestCase):
                 terminal="xterm",
             )
         )
-        self.assertIn("Recommended default:", prompt)
-        self.assertIn("SSH connect", prompt)
-        self.assertIn("briefcase", prompt.lower())
+        self.assertIn("Flujo recomendado:", prompt)
+        self.assertIn("Conectar dos hosts", prompt)
+        self.assertIn("maleta", prompt.lower())
 
     def test_should_accept_all_honors_flags_and_env(self):
         self.assertTrue(should_accept_all(accept_all=True))

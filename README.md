@@ -8,8 +8,16 @@ Built by Black Boss.
 
 Nuevo host o primera instalación:
 
+En Linux, macOS o WSL:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.sh | bash
+```
+
+En PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.ps1 | iex
 ```
 
 Luego:
@@ -35,6 +43,12 @@ Ruta recomendada:
   - restaura el destino desde bundle + secrets
 - `omni agent`
   - configura Claude, GPT, Gemini, Mistral, Ollama o un endpoint compatible
+
+Instalación global por npm:
+
+```bash
+npm install -g omnisync
+```
 
 ## Superficie principal
 
@@ -92,7 +106,7 @@ Y deja dos artefactos:
 - `briefcase.json`
 - `briefcase.restore.sh`
 
-Ahora el punto de entrada recomendado ya no es memorizar comandos bajos: es ejecutar `omni` o `omni start` y dejar que la CLI te guíe hacia `bridge`, `capture`, `restore`, `migrate` o `doctor`.
+Ahora el punto de entrada recomendado ya no es memorizar comandos bajos: es ejecutar `omni` o `omni start` y dejar que la CLI te guíe hacia `SSH Connect`, `Maleta`, `Restore`, `Migrate Sync`, `Doctor`, `Agent` o `Chat`.
 
 Por defecto no intenta clonar `/home/ubuntu` tal cual.
 La regla base es preservar lo que sí construye producto y separar lo que debe viajar aparte. Si activas `full-home`, entonces sí captura literalmente todo `/home/ubuntu` como estado raíz y mantiene secretos aparte.
@@ -253,7 +267,29 @@ Desde otra PC, incluyendo PowerShell en Windows:
 
 ```powershell
 pwsh ./bootstrap.ps1 -TargetHost 1.2.3.4 -User ubuntu -RepoUrl git@github.com:sxrubyo/omnisync.git -Branch main -InstallTimer
+```
+
 Si no pasas `-Destination`, `bootstrap.ps1` escanea el host remoto, recomienda rutas y te deja elegir o escribir una personalizada.
+
+### 2.1 Instalación local directa en Windows
+
+```powershell
+irm https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.ps1 | iex
+```
+
+Ese flujo:
+
+- prepara `~/.omni`
+- descarga el repo público a `~/.omni/repo`
+- crea un runtime Python aislado en `~/.omni/runtime`
+- deja `omni.cmd` en `~/.local/bin`
+- actualiza el `Path` del usuario para que `omni` quede disponible en PowerShell
+
+Si prefieres inspeccionar el script antes de ejecutarlo:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/sxrubyo/omnisync/main/install.ps1 -OutFile install.ps1
+./install.ps1
 ```
 
 Ese wrapper se conecta por SSH al host Linux, prepara paquetes base, clona o actualiza OmniSync y dispara el mismo bootstrap de producción.

@@ -266,4 +266,7 @@ Commands:
 
 One-line install:
   curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/install.sh | bash
+
+PowerShell:
+  irm https://raw.githubusercontent.com/${REPO_SLUG}/main/install.ps1 | iex
 EOF

@@ -39,7 +39,10 @@ class CliUxOpsTests(unittest.TestCase):
             ],
         )
         self.assertTrue(any("OMNI CONTROL SURFACE" in line for line in lines))
-        self.assertTrue(any("O  M  N  I" in line and "OMNI CONTROL SURFACE" in line for line in lines))
+        self.assertTrue(any("HOST SNAPSHOT" in line for line in lines))
+        self.assertTrue(any("QUICKSTART" in line for line in lines))
+        self.assertTrue(any("O  M  N  I" in line for line in lines))
+        self.assertTrue(any("Host:" in line for line in lines))
 
     def test_build_guided_start_surface_lines_places_start_and_control_boxes_beside_brand(self):
         lines = build_guided_start_surface_lines(
@@ -63,7 +66,9 @@ class CliUxOpsTests(unittest.TestCase):
         )
         self.assertTrue(any("Omni Guided Start" in line for line in lines))
         self.assertTrue(any("OMNI CONTROL SURFACE" in line for line in lines))
-        self.assertTrue(any("v2.1.0" in line and "OMNI CONTROL SURFACE" in line for line in lines))
+        self.assertTrue(any("START" in line for line in lines))
+        self.assertTrue(any("v2.1.0" in line for line in lines))
+        self.assertTrue(any("Host:" in line for line in lines))
 
 
 if __name__ == "__main__":

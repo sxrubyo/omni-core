@@ -29,7 +29,7 @@ def build_guide_entries() -> List[GuideEntry]:
         GuideEntry(
             key="briefcase",
             title="Maleta",
-            description="Empaqueta el inventario portátil del sistema y genera el plan de restauración.",
+            description="Empaqueta el inventario portátil del sistema y deja lista la restauración.",
             estimated_time="1-3 min",
             command="omni briefcase --full",
         ),
@@ -43,7 +43,7 @@ def build_guide_entries() -> List[GuideEntry]:
         GuideEntry(
             key="agent",
             title="AI Agent",
-            description="Configura Omni Agent, detecta CLIs de agentes y prepara el modelo activo.",
+            description="Configura Omni Agent, detecta CLIs instalados y prepara el modelo activo.",
             estimated_time="2-4 min",
             command="omni agent",
         ),

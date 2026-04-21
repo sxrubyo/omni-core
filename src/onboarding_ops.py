@@ -106,12 +106,12 @@ def build_flow_options(platform_info: PlatformInfo | None = None) -> list[FlowOp
     return [
         FlowOption("connect", "SSH Connect", "Conecta dos máquinas por SSH, detecta el host remoto y envía la maleta.", recommended == "connect"),
         FlowOption("briefcase", "Maleta", "Empaqueta el inventario portátil del sistema y genera el restore script.", recommended == "briefcase"),
-        FlowOption("restore", "Restore", "Restore a target host from bundle plus secrets.", recommended == "restore"),
+        FlowOption("restore", "Restore", "Restaura el host destino desde bundles, secretos y dependencias base.", recommended == "restore"),
         FlowOption("migrate-sync", "Migrate Sync", "Reconstruye o mueve un host completo con create/plan/capture/restore.", recommended == "migrate-sync"),
-        FlowOption("doctor", "Doctor", "Inspect health, disk, timers and cleanup opportunities.", recommended == "doctor"),
-        FlowOption("agent", "Agent", "Configure Omni Agent with Claude, Gemini, OpenRouter, Qwen or a custom endpoint.", recommended == "agent"),
-        FlowOption("chat", "Chat", "Open the operator chat surface and example prompts.", recommended == "chat"),
-        FlowOption("advanced", "Advanced", "Use lower-level Omni commands directly.", recommended == "advanced"),
+        FlowOption("doctor", "Doctor", "Inspecciona salud, disco, timers y oportunidades de limpieza.", recommended == "doctor"),
+        FlowOption("agent", "Agent", "Configura Omni Agent con Claude, Gemini, OpenRouter, Qwen o un endpoint propio.", recommended == "agent"),
+        FlowOption("chat", "Chat", "Abre la superficie conversacional del operador y sus prompts base.", recommended == "chat"),
+        FlowOption("advanced", "Advanced", "Usa comandos de Omni de bajo nivel directamente.", recommended == "advanced"),
     ]
 
 
@@ -148,7 +148,7 @@ def build_start_menu(
     questions = build_start_questions(info, env=env)
     return {
         "title": "OmniSync Guided Start",
-        "subtitle": "Choose a recovery path. The CLI can guide the first run or run non-interactively.",
+        "subtitle": "Elige una ruta de migración. Omni puede guiar el primer arranque o ejecutarse sin interacción.",
         "platform": info.to_dict(),
         "recommended_flow": recommended_start_flow(info, env=env),
         "options": [option.to_dict() for option in options],
@@ -175,16 +175,16 @@ def build_flow_prompt(
     info = platform_info or detect_platform_info(env)
     recommended = recommended_start_flow(info, env=env)
     return (
-        "OmniSync ready.\n"
-        f"Detected platform: {info.system} / {info.shell} / {info.package_manager}\n"
-        "What do you want to do first?\n"
-        "1. SSH connect two hosts\n"
-        "2. Build the full briefcase contract\n"
-        "3. Restore a server from bundle + secrets\n"
-        "4. Run migrate sync on this host\n"
-        "5. Doctor / cleanup / disk recovery\n"
-        "6. Configure Omni Agent\n"
-        "7. Open chat surface\n"
-        f"Recommended default: {recommended}\n"
-        "Answer with a number or a flow name."
+        "OmniSync listo.\n"
+        f"Plataforma detectada: {info.system} / {info.shell} / {info.package_manager}\n"
+        "¿Qué quieres hacer primero?\n"
+        "1. Conectar dos hosts por SSH\n"
+        "2. Construir la maleta completa\n"
+        "3. Restaurar un servidor desde bundle + secretos\n"
+        "4. Ejecutar migrate sync en este host\n"
+        "5. Doctor / limpieza / recuperación de disco\n"
+        "6. Configurar Omni Agent\n"
+        "7. Abrir la superficie de chat\n"
+        f"Flujo recomendado: {recommended}\n"
+        "Responde con un número o con el nombre del flujo."
     )
