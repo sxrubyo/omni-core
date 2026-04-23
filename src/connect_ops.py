@@ -32,6 +32,7 @@ class SSHDestination:
 REMOTE_SYSTEM_ALIASES = {
     "": "auto",
     "auto": "auto",
+    "posix": "posix",
     "linux": "posix",
     "unix": "posix",
     "ubuntu": "posix",
@@ -226,7 +227,7 @@ def _run_password_interactive_command(
             result = runner(
                 command,
                 stdout=stdout_file,
-                stderr=subprocess.PIPE,
+                stderr=None,
                 text=True,
                 check=False,
                 timeout=timeout,

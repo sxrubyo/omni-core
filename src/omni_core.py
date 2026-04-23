@@ -3088,6 +3088,7 @@ class OmniCore:
         resolved_key_path = str(Path(key_path).expanduser()) if key_path else ""
         resolved_password = os.environ.get(password_env, "").strip() if password_env else ""
         sshpass_available = bool(shutil.which("sshpass"))
+        use_native_ssh_password_prompt = False
 
         if resolved_auth_mode == "key":
             if not resolved_key_path:
@@ -3104,6 +3105,7 @@ class OmniCore:
             if self.is_dry_run():
                 resolved_password = resolved_password or ""
             elif not sshpass_available and self.is_interactive():
+                use_native_ssh_password_prompt = True
                 resolved_password = ""
                 info(
                     self.t(
@@ -3117,7 +3119,7 @@ class OmniCore:
                 except KeyboardInterrupt:
                     print()
                     raise
-            if not self.is_dry_run() and not resolved_password:
+            if not self.is_dry_run() and not use_native_ssh_password_prompt and not resolved_password:
                 render_human_error(
                     "No recibí una contraseña SSH para el modo password.",
                     suggestion=f"Exporta `{password_env}` o usa `SSH Agent / clave cargada`.",
@@ -3190,9 +3192,9 @@ class OmniCore:
             kv("Identity", target.key_path, color=C.GRN)
         elif resolved_auth_mode == "password":
             identity_hint = (
-                f"password via {password_env}"
-                if resolved_password
-                else self.t("prompt interactivo de ssh", "interactive ssh prompt")
+                self.t("prompt interactivo de ssh", "interactive ssh prompt")
+                if use_native_ssh_password_prompt or not resolved_password
+                else f"password via {password_env}"
             )
             kv("Identity", identity_hint, color=C.GRN)
         nl()

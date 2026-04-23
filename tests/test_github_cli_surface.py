@@ -172,6 +172,57 @@ class GitHubCliSurfaceTests(unittest.TestCase):
                 profile="full-home",
             )
 
+    def test_connect_cmd_password_without_sshpass_uses_native_prompt_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            briefcase_path = Path(tmp) / "briefcase.json"
+            briefcase_path.write_text("{}", encoding="utf-8")
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch("omni_core.print_logo"))
+                stack.enter_context(mock.patch("omni_core.render_command_header"))
+                stack.enter_context(mock.patch("omni_core.section"))
+                stack.enter_context(mock.patch("omni_core.kv"))
+                stack.enter_context(mock.patch("omni_core.nl"))
+                stack.enter_context(mock.patch("omni_core.info"))
+                stack.enter_context(mock.patch("omni_core.render_action_summary"))
+                error_mock = stack.enter_context(mock.patch("omni_core.render_human_error"))
+                stack.enter_context(mock.patch("omni_core.shutil.which", side_effect=lambda name: None if name == "sshpass" else f"/usr/bin/{name}"))
+                stack.enter_context(
+                    mock.patch(
+                        "omni_core.probe_remote_host",
+                        return_value={
+                            "system": "Linux",
+                            "package_manager": "apt",
+                            "home_entries": 2,
+                            "git_repos": 0,
+                            "package_count": 12,
+                            "fresh_server": True,
+                            "rsync_available": False,
+                            "system_family": "posix",
+                        },
+                    )
+                )
+                transfer_mock = stack.enter_context(
+                    mock.patch(
+                        "omni_core.transfer_payload",
+                        return_value={"success": True, "transport": "sftp", "stdout": "", "stderr": ""},
+                    )
+                )
+                core = omni_core.OmniCore()
+                stack.enter_context(mock.patch.object(core, "is_interactive", return_value=True))
+                core.connect_cmd(
+                    host="192.168.0.3",
+                    user="u0_a332",
+                    port=8022,
+                    auth_mode="password",
+                    target_system="posix",
+                    transport="auto",
+                    briefcase_path=str(briefcase_path),
+                )
+
+            error_mock.assert_not_called()
+            transfer_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

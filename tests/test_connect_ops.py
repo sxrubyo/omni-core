@@ -21,6 +21,11 @@ from connect_ops import (  # noqa: E402
 
 
 class ConnectOpsTests(unittest.TestCase):
+    def test_normalize_remote_system_accepts_posix(self):
+        from connect_ops import normalize_remote_system
+
+        self.assertEqual(normalize_remote_system("posix"), "posix")
+
     def test_parse_remote_probe_output_detects_fresh_server(self):
         payload = parse_remote_probe_output(
             "system=Linux\npackage_manager=apt-get\nhome_entries=2\ngit_repos=0\npackage_count=80\nfresh_server=true\nrsync_available=true\n"
