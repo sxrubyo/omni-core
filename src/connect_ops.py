@@ -5,6 +5,7 @@ import posixpath
 import shlex
 import socket
 import stat
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -246,6 +247,44 @@ def probe_remote_host(
         client.close()
 
     raise RuntimeError(" | ".join(errors) if errors else "SSH probe failed")
+
+
+def wait_for_tcp_port(host: str, port: int, *, timeout: int = 20, interval: float = 0.5) -> bool:
+    deadline = time.time() + max(1, timeout)
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, int(port)), timeout=min(max(interval, 0.2), 2.0)):
+                return True
+        except OSError:
+            time.sleep(max(0.1, interval))
+    return False
+
+
+def build_reverse_tunnel_command(
+    *,
+    relay_host: str,
+    relay_user: str,
+    relay_ssh_port: int,
+    relay_bind_port: int,
+    local_ssh_port: int,
+    bind_host: str = "127.0.0.1",
+) -> str:
+    relay_target = f"{relay_user}@{relay_host}"
+    return " ".join(
+        [
+            "ssh",
+            "-N",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-R",
+            shlex.quote(f"{bind_host}:{relay_bind_port}:localhost:{local_ssh_port}"),
+            "-p",
+            str(int(relay_ssh_port or 22)),
+            shlex.quote(relay_target),
+        ]
+    )
 
 
 def _resolve_remote_path(sftp: Any, remote_path: str) -> str:

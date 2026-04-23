@@ -13,11 +13,13 @@ if str(SRC) not in sys.path:
 import connect_ops  # noqa: E402
 from connect_ops import (  # noqa: E402
     SSHDestination,
+    build_reverse_tunnel_command,
     build_rsync_command,
     build_sftp_command,
     parse_remote_probe_output,
     probe_remote_host,
     transfer_payload,
+    wait_for_tcp_port,
 )
 
 
@@ -131,6 +133,22 @@ class ConnectOpsTests(unittest.TestCase):
         command, batch = build_sftp_command(["/tmp/briefcase.json"], destination, remote_path="~/omni-transfer")
         self.assertEqual(command[0], "paramiko")
         self.assertEqual(batch, "")
+
+    def test_build_reverse_tunnel_command_renders_termux_friendly_ssh(self):
+        command = build_reverse_tunnel_command(
+            relay_host="3.137.123.141",
+            relay_user="ubuntu",
+            relay_ssh_port=22,
+            relay_bind_port=46022,
+            local_ssh_port=8022,
+        )
+        self.assertIn("ssh -N", command)
+        self.assertIn("127.0.0.1:46022:localhost:8022", command)
+        self.assertIn("ubuntu@3.137.123.141", command)
+
+    def test_wait_for_tcp_port_returns_false_when_host_never_opens(self):
+        with patch.object(connect_ops.socket, "create_connection", side_effect=OSError("down")):
+            self.assertFalse(wait_for_tcp_port("127.0.0.1", 65000, timeout=1, interval=0.01))
 
     def test_probe_remote_host_falls_back_to_windows_when_auto_detect_needs_it(self):
         client = FakeSSHClient(

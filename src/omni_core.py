@@ -56,7 +56,14 @@ from cli_ux_ops import (
     render_human_error,
 )
 from cleanup_ops import build_purge_plan, execute_purge
-from connect_ops import SSHDestination, normalize_remote_system, probe_remote_host, transfer_payload
+from connect_ops import (
+    SSHDestination,
+    build_reverse_tunnel_command,
+    normalize_remote_system,
+    probe_remote_host,
+    transfer_payload,
+    wait_for_tcp_port,
+)
 from full_inventory_ops import collect_full_inventory
 from github_ops import (
     GitHubTarget,
@@ -181,6 +188,19 @@ def split_host_and_port(raw_host: str, default_port: int = 22) -> tuple[str, int
         if port_part.isdigit():
             return host_part, int(port_part)
     return value, int(default_port or 22)
+
+
+def suggest_relay_host() -> str:
+    env_host = str(os.environ.get("OMNI_RELAY_HOST", "") or "").strip()
+    if env_host:
+        return env_host
+    fqdn = str(socket.getfqdn() or "").strip()
+    if fqdn and fqdn not in {"localhost", "localhost.localdomain"}:
+        return fqdn
+    hostname = str(socket.gethostname() or "").strip()
+    if hostname:
+        return hostname
+    return "relay-host"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PLATFORM COMPATIBILITY
@@ -3227,22 +3247,179 @@ class OmniCore:
             warn("Dry run activo: no se abrirá la conexión SSH ni se transferirán archivos.")
             return
 
-        try:
+        def run_remote_probe(active_target: SSHDestination) -> Dict[str, Any]:
             info(self.t("Paso 1/3 · Validando acceso SSH y detectando el host remoto.", "Step 1/3 · Validating SSH access and detecting the remote host."))
             with Spinner("Sondeando host remoto...", color=C.PRIMARY) as spinner:
                 probe_timeout = 45 if resolved_auth_mode == "password" else (12 if resolved_target_system == "auto" else 20)
-                remote = probe_remote_host(target, timeout=probe_timeout)
+                payload = probe_remote_host(active_target, timeout=probe_timeout)
                 spinner.finish("Host remoto detectado", success=True)
-        except Exception as err:
-            self.save_continue_state(flow="connect", status="probe_failed", params=checkpoint_params, error=str(err))
-            render_human_error(
-                f"No se pudo inspeccionar el host remoto: {err}",
-                suggestion=self.t(
-                    "Sigue así: 1) ejecuta `omni continue` y elige `Editar conexión guardada`; 2) corrige host, puerto, usuario o auth; 3) si el host usa OpenSSH en Windows, puedes pasar `--target-system windows`.",
-                    "Next steps: 1) run `omni continue` and choose `Edit saved connection`; 2) fix host, port, user or auth; 3) if the host runs OpenSSH on Windows, you can pass `--target-system windows`.",
-                ),
+                return payload
+
+        def maybe_prepare_reverse_tunnel() -> SSHDestination | None:
+            relay_host_default = suggest_relay_host()
+            relay_user_default = getpass.getuser()
+            relay_ssh_port_default = 22
+            relay_bind_port_default = random.randint(46022, 46999)
+            device_ssh_port_default = int(resolved_port or 8022)
+
+            relay_host_value = self.prompt_text(
+                self.t("Host del relay (tu servidor público o Tailscale)", "Relay host (your public server or Tailscale node)"),
+                relay_host_default,
             )
-            return
+            relay_user_value = self.prompt_text(self.t("Usuario del relay", "Relay user"), relay_user_default)
+            relay_port_value = self.prompt_text(self.t("Puerto SSH del relay", "Relay SSH port"), str(relay_ssh_port_default)).strip()
+            relay_bind_port_value = self.prompt_text(
+                self.t("Puerto que abriré en el relay", "Port to expose on the relay"),
+                str(relay_bind_port_default),
+            ).strip()
+            device_ssh_port_value = self.prompt_text(
+                self.t("Puerto SSH del dispositivo oculto", "Hidden device SSH port"),
+                str(device_ssh_port_default),
+            ).strip()
+
+            try:
+                relay_ssh_port = int(relay_port_value or relay_ssh_port_default)
+                relay_bind_port = int(relay_bind_port_value or relay_bind_port_default)
+                device_ssh_port = int(device_ssh_port_value or device_ssh_port_default)
+            except ValueError:
+                render_human_error(
+                    self.t("Los puertos del túnel inverso deben ser numéricos.", "Reverse tunnel ports must be numeric."),
+                    suggestion=self.t("Usa enteros como `22`, `8022` o `46022`.", "Use integers like `22`, `8022` or `46022`."),
+                )
+                return None
+
+            tunnel_command = build_reverse_tunnel_command(
+                relay_host=relay_host_value,
+                relay_user=relay_user_value,
+                relay_ssh_port=relay_ssh_port,
+                relay_bind_port=relay_bind_port,
+                local_ssh_port=device_ssh_port,
+            )
+            tunnel_lines = [
+                self.t("1. Ejecuta este comando en Termux o en el host oculto y déjalo abierto:", "1. Run this command on Termux or the hidden host and keep it open:"),
+                *textwrap.wrap(tunnel_command, width=max(48, TERM_WIDTH - 16)),
+                self.t(f"2. Omni esperará que el relay abra 127.0.0.1:{relay_bind_port}.", f"2. Omni will wait for the relay to open 127.0.0.1:{relay_bind_port}."),
+                self.t("3. Cuando el túnel esté arriba, vuelve aquí y confirma.", "3. Once the tunnel is up, come back here and confirm."),
+            ]
+            render_action_summary(self.t("Túnel inverso", "Reverse tunnel"), tunnel_lines, accent=C.PRIMARY)
+            if not self.confirm_step(
+                self.t("¿Ya dejaste corriendo el comando del túnel inverso?", "Is the reverse tunnel command already running?"),
+                default=True,
+            ):
+                warn(self.t("Túnel inverso cancelado por el operador.", "Reverse tunnel cancelled by the operator."))
+                return None
+
+            info(self.t("Espero el túnel inverso en localhost para reintentar la conexión.", "Waiting for the reverse tunnel on localhost before retrying the connection."))
+            with Spinner("Esperando túnel inverso...", color=C.PRIMARY) as spinner:
+                ready = wait_for_tcp_port("127.0.0.1", relay_bind_port, timeout=20, interval=0.5)
+                spinner.finish("Túnel inverso listo", success=ready)
+
+            checkpoint_params.update(
+                {
+                    "route": "reverse-tunnel",
+                    "relay_host": relay_host_value,
+                    "relay_user": relay_user_value,
+                    "relay_port": relay_ssh_port,
+                    "relay_bind_port": relay_bind_port,
+                    "device_ssh_port": device_ssh_port,
+                }
+            )
+            self.save_continue_state(flow="connect", status="probe_pending", params=checkpoint_params)
+
+            if not ready:
+                render_human_error(
+                    self.t(
+                        f"No vi abrirse el túnel en 127.0.0.1:{relay_bind_port}.",
+                        f"I did not see the tunnel open on 127.0.0.1:{relay_bind_port}.",
+                    ),
+                    suggestion=tunnel_command,
+                )
+                return None
+
+            return SSHDestination(
+                host="127.0.0.1",
+                user=resolved_user or getpass.getuser(),
+                port=relay_bind_port,
+                key_path=resolved_key_path,
+                auth_mode=resolved_auth_mode,
+                password=resolved_password,
+                target_system=resolved_target_system,
+            )
+
+        try:
+            remote = run_remote_probe(target)
+        except Exception as err:
+            err_text = str(err)
+            recovered_via_tunnel = False
+            if self.is_interactive() and "No pude abrir TCP hacia" in err_text:
+                selected_route = select_menu(
+                    [
+                        self.t("Preparar túnel inverso", "Prepare reverse tunnel"),
+                        self.t("Salir por ahora", "Exit for now"),
+                    ],
+                    title=self.t("No veo ruta directa hacia ese host", "I do not see a direct route to that host"),
+                    descriptions=[
+                        self.t(
+                            "Útil para Termux, CGNAT o redes privadas: Omni genera el comando `ssh -R`, espera el túnel y reintenta por localhost.",
+                            "Useful for Termux, CGNAT or private networks: Omni generates the `ssh -R` command, waits for the tunnel and retries through localhost.",
+                        ),
+                        self.t(
+                            "Mantén el checkpoint y vuelve luego con `omni continue`.",
+                            "Keep the checkpoint and come back later with `omni continue`.",
+                        ),
+                    ],
+                    icons=["🪄", "⏸️"],
+                    default=0,
+                    show_index=True,
+                    footer=self.t("↑/↓ elegir ruta · Enter confirmar", "↑/↓ choose path · Enter confirm"),
+                )
+                if selected_route == 0:
+                    tunnel_target = maybe_prepare_reverse_tunnel()
+                    if tunnel_target is not None:
+                        target = tunnel_target
+                        checkpoint_params["host"] = target.host
+                        checkpoint_params["port"] = target.port
+                        checkpoint_params["user"] = target.user
+                        try:
+                            remote = run_remote_probe(target)
+                            recovered_via_tunnel = True
+                        except Exception as tunnel_err:
+                            self.save_continue_state(flow="connect", status="probe_failed", params=checkpoint_params, error=str(tunnel_err))
+                            render_human_error(
+                                f"No se pudo inspeccionar el host remoto: {tunnel_err}",
+                                suggestion=self.t(
+                                    "Sigue así: 1) ejecuta `omni continue`; 2) elige `Editar conexión guardada` si quieres cambiar relay, puerto o auth; 3) verifica que el comando `ssh -R` siga vivo en Termux.",
+                                    "Next steps: 1) run `omni continue`; 2) choose `Edit saved connection` if you want to change relay, port or auth; 3) verify the `ssh -R` command is still alive in Termux.",
+                                ),
+                            )
+                            return
+                    else:
+                        return
+                else:
+                    warn(self.t("Conexión pausada. Puedes retomarla luego con `omni continue`.", "Connection paused. You can resume it later with `omni continue`."))
+                    return
+            if recovered_via_tunnel:
+                pass
+            elif "Authentication failed" in err_text or "publickey" in err_text.lower():
+                self.save_continue_state(flow="connect", status="probe_failed", params=checkpoint_params, error=err_text)
+                render_human_error(
+                    f"No se pudo inspeccionar el host remoto: {err_text}",
+                    suggestion=self.t(
+                        "Ese servidor parece aceptar solo `publickey`. Opciones: 1) cambia a `SSH Agent / clave cargada`; 2) usa una clave `.pem` o OpenSSH; 3) habilita `PasswordAuthentication yes` en el relay si controlas ese host.",
+                        "That server appears to accept only `publickey`. Options: 1) switch to `SSH Agent / loaded key`; 2) use a `.pem` or OpenSSH private key; 3) enable `PasswordAuthentication yes` on the relay if you control that host.",
+                    ),
+                )
+                return
+            elif not recovered_via_tunnel:
+                self.save_continue_state(flow="connect", status="probe_failed", params=checkpoint_params, error=str(err))
+                render_human_error(
+                    f"No se pudo inspeccionar el host remoto: {err}",
+                    suggestion=self.t(
+                        "Sigue así: 1) ejecuta `omni continue` y elige `Editar conexión guardada`; 2) corrige host, puerto, usuario o auth; 3) si el host usa OpenSSH en Windows, puedes pasar `--target-system windows`; 4) si el destino está detrás de NAT, usa `Preparar túnel inverso`.",
+                        "Next steps: 1) run `omni continue` and choose `Edit saved connection`; 2) fix host, port, user or auth; 3) if the host runs OpenSSH on Windows, you can pass `--target-system windows`; 4) if the target sits behind NAT, use `Prepare reverse tunnel`.",
+                    ),
+                )
+                return
 
         freshness = "Servidor limpio" if remote.get("fresh_server") else ("Host Windows existente" if remote.get("system_family") == "windows" else "Host Unix existente")
         render_action_summary(
