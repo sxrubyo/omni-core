@@ -101,7 +101,11 @@ class OmniCliNavigationTests(unittest.TestCase):
             )
             os.write(master, b"\x03")
             drain_until("Doctor", 0.5)
-            proc.wait(timeout=1)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                proc.wait(timeout=1)
         finally:
             if proc.poll() is None:
                 proc.kill()

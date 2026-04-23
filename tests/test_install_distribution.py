@@ -22,11 +22,17 @@ class InstallDistributionTests(unittest.TestCase):
         self.assertIn("https://github.com/$RepoSlug/archive/refs/heads/main.zip", contents)
         self.assertIn("omni.cmd", contents)
         self.assertIn("Get-Command omni", contents)
+        self.assertIn("Paramiko habilita conexiones SSH por contraseña", contents)
 
     def test_readme_mentions_windows_install_command(self) -> None:
         contents = README.read_text(encoding="utf-8")
         self.assertIn("install.ps1 | iex", contents)
         self.assertIn("npm install -g omnisync", contents)
+
+    def test_unix_install_script_explains_paramiko_bootstrap(self) -> None:
+        contents = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("Paramiko habilita conexiones SSH por contraseña", contents)
+        self.assertIn("OMNI_INSTALL_ASSUME_YES", contents)
 
     def test_repo_does_not_track_snapshot_payloads(self) -> None:
         result = subprocess.run(

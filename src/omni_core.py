@@ -166,6 +166,22 @@ def normalize_language(value: str | None) -> str:
         return "en"
     return "es"
 
+
+def split_host_and_port(raw_host: str, default_port: int = 22) -> tuple[str, int]:
+    value = str(raw_host or "").strip()
+    if not value:
+        return "", int(default_port or 22)
+    if value.startswith("[") and "]:" in value:
+        host_part, port_part = value.rsplit("]:", 1)
+        host_part = host_part[1:]
+        if port_part.isdigit():
+            return host_part, int(port_part)
+    if value.count(":") == 1:
+        host_part, port_part = value.rsplit(":", 1)
+        if port_part.isdigit():
+            return host_part, int(port_part)
+    return value, int(default_port or 22)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PLATFORM COMPATIBILITY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2595,7 +2611,7 @@ class OmniCore:
         bullet("Mover un host completo  -> omni start -> Migrate Sync", C.GRN)
         dim("Omni genera maleta, restore script, bundles y deja el destino listo.")
         bullet("Conectar dos máquinas por SSH  -> omni start -> SSH Connect", C.GRN)
-        dim("Ideal para enviar el payload directo al destino con rsync o SFTP.")
+        dim("Ideal para enviar el payload directo al destino con Paramiko + SFTP.")
         bullet("Crear maleta portable  -> omni briefcase --full", C.GRN)
         dim("Genera inventory real, contrato portable y restore shell script.")
         bullet("Configurar Omni Agent  -> omni agent", C.GRN)
@@ -3034,48 +3050,29 @@ class OmniCore:
                 self.clear_continue_state("connect")
 
         resolved_target_system = normalize_remote_system(target_system)
-        if self.is_interactive() and not target_system:
-            system_options = [
-                ("auto", "Auto detect", "Prueba Unix primero y luego Windows/OpenSSH si hace falta."),
-                ("posix", "Linux / macOS / WSL", "Usa un probe POSIX y prioriza rsync cuando existe."),
-                ("windows", "Windows / PowerShell", "Usa un probe PowerShell y prioriza SFTP para no asumir rsync."),
-            ]
-            selected_system = select_menu(
-                [title for _, title, _ in system_options],
-                title="¿Qué sistema operativo tiene el host destino?",
-                descriptions=[description for _, _, description in system_options],
-                icons=["🛰️", "🐧", "🪟"],
-                default=0,
-                show_index=True,
-                footer="↑/↓ elegir host remoto · Enter confirmar · número salto directo",
-            )
-            resolved_target_system = system_options[selected_system][0]
-
-        resolved_host = host or self.prompt_text("Destino SSH (host o IP)", "")
+        host_prompt = self.t(
+            "Destino SSH (host o IP, opcional :puerto)",
+            "SSH destination (host or IP, optional :port)",
+        )
+        resolved_host_raw = host or self.prompt_text(host_prompt, "")
+        resolved_host, parsed_port = split_host_and_port(resolved_host_raw, int(port or 22))
         resolved_user = user or self.prompt_text("Usuario SSH", getpass.getuser())
-        resolved_port = int(port or 22)
-        if not host and self.is_interactive():
-            raw_port = self.prompt_text("Puerto SSH", str(resolved_port))
-            try:
-                resolved_port = int(raw_port)
-            except ValueError:
-                resolved_port = int(port or 22)
+        resolved_port = parsed_port
 
-        resolved_auth_mode = str(auth_mode or ("key" if key_path else "agent")).strip().lower()
-        if self.is_interactive() and not auth_mode and not key_path:
+        resolved_auth_mode = str(auth_mode or ("key" if key_path else "password")).strip().lower()
+        if self.is_interactive() and not auth_mode:
             auth_options = [
-                ("agent", "SSH Agent / clave cargada", "Usa la clave ya cargada en ssh-agent o el método por defecto del host."),
-                ("key", "Ruta a clave privada", "Pide una ruta local a `id_ed25519`, `id_rsa` u otra clave privada."),
-                ("password", "Contraseña", "Usa contraseña solo si el host no acepta agent o clave privada."),
+                ("password", "Contraseña", "Solo pide host, usuario y contraseña. Ideal para mover rápido a otro host."),
+                ("key", "SSH Key (recomendado)", "Usa una clave privada local sin pedir passphrase adicional."),
             ]
             selected_auth = select_menu(
                 [title for _, title, _ in auth_options],
-                title="¿Cómo quieres autenticarte contra el host remoto?",
+                title="Método de conexión SSH",
                 descriptions=[description for _, _, description in auth_options],
-                icons=["🗝️", "🔐", "🔑"],
+                icons=["🔑", "🗝️"],
                 default=0,
                 show_index=True,
-                footer="↑/↓ elegir autenticación · Enter confirmar · número salto directo",
+                footer="↑/↓ elegir método · Enter confirmar · número salto directo",
             )
             resolved_auth_mode = auth_options[selected_auth][0]
 
@@ -3086,9 +3083,7 @@ class OmniCore:
                 break
 
         resolved_key_path = str(Path(key_path).expanduser()) if key_path else ""
-        resolved_password = os.environ.get(password_env, "").strip() if password_env else ""
-        sshpass_available = bool(shutil.which("sshpass"))
-        use_native_ssh_password_prompt = False
+        resolved_password: str | None = os.environ.get(password_env, "").strip() if password_env else ""
 
         if resolved_auth_mode == "key":
             if not resolved_key_path:
@@ -3097,64 +3092,32 @@ class OmniCore:
             if not key_file.exists() or key_file.is_dir():
                 render_human_error(
                     "La ruta indicada no parece una clave privada SSH válida.",
-                    suggestion="Si ibas a escribir una contraseña, vuelve a elegir `Contraseña`. Si usarás ssh-agent, elige `SSH Agent / clave cargada`.",
+                    suggestion="Elige `Contraseña` si quieres conectar solo con host, usuario y contraseña.",
                 )
                 return
             resolved_key_path = str(key_file)
-        elif resolved_auth_mode == "password":
-            if self.is_dry_run():
-                resolved_password = resolved_password or ""
-            elif not sshpass_available and self.is_interactive():
-                use_native_ssh_password_prompt = True
-                resolved_password = ""
-                info(
-                    self.t(
-                        "No detecté `sshpass`; usaré el prompt nativo de `ssh` para pedir la contraseña durante la conexión.",
-                        "I did not detect `sshpass`; I will use the native `ssh` prompt to request the password during connection.",
-                    )
-                )
-            elif not resolved_password and self.is_interactive():
+            resolved_password = None
+        else:
+            if not resolved_password and self.is_interactive():
                 try:
                     resolved_password = getpass.getpass("Contraseña SSH: ").strip()
                 except KeyboardInterrupt:
                     print()
                     raise
-            if not self.is_dry_run() and not use_native_ssh_password_prompt and not resolved_password:
+            if not self.is_dry_run() and not resolved_password:
                 render_human_error(
                     "No recibí una contraseña SSH para el modo password.",
-                    suggestion=f"Exporta `{password_env}` o usa `SSH Agent / clave cargada`.",
+                    suggestion=f"Escríbela cuando Omni la pida o exporta `{password_env}` antes de ejecutar el comando.",
                 )
                 return
             resolved_key_path = ""
-        else:
-            resolved_auth_mode = "agent"
-            resolved_key_path = ""
 
-        requested_transport = str(transport or "").strip().lower()
-        if requested_transport not in {"rsync", "sftp", "auto"}:
-            requested_transport = "auto"
-        resolved_transport = requested_transport or ("sftp" if resolved_target_system == "windows" else "auto")
-        if self.is_interactive() and transport.lower().strip() not in {"rsync", "sftp", "auto"}:
-            transport_options = [
-                ("auto", "Auto", "Elige rsync en hosts Unix y SFTP en Windows cuando convenga."),
-                ("rsync", "rsync", "Más rápido para Unix cuando rsync existe en ambos extremos."),
-                ("sftp", "SFTP", "Más compatible, especialmente en Windows/OpenSSH."),
-            ]
-            selected_transport = select_menu(
-                [title for _, title, _ in transport_options],
-                title="¿Qué transporte quieres usar para mover la maleta?",
-                descriptions=[description for _, _, description in transport_options],
-                icons=["🧭", "🚀", "📦"],
-                default=0 if resolved_target_system != "windows" else 2,
-                show_index=True,
-                footer="↑/↓ elegir transporte · Enter confirmar · número salto directo",
-            )
-            resolved_transport = transport_options[selected_transport][0]
+        resolved_transport = "sftp"
 
         if not resolved_host:
             render_human_error(
                 "Falta el host remoto para iniciar la conexión.",
-                suggestion="Usa `omni connect --host <ip|fqdn> --user <usuario>`.",
+                suggestion="Usa `omni connect --host <ip|fqdn> --user <usuario>` o escribe `host:puerto` en el primer campo.",
             )
             return
 
@@ -3185,17 +3148,13 @@ class OmniCore:
         self.save_continue_state(flow="connect", status="probe_pending", params=checkpoint_params)
         kv("Target", target.target(), color=C.GRN)
         kv("Remote OS", resolved_target_system or "auto", color=C.GRN)
-        kv("Transport", resolved_transport, color=C.GRN)
+        kv("Transport", "paramiko+sftp", color=C.GRN)
         kv("Remote Path", remote_path or "~/omni-transfer", color=C.GRN)
         kv("Auth", resolved_auth_mode, color=C.GRN)
         if target.key_path:
             kv("Identity", target.key_path, color=C.GRN)
         elif resolved_auth_mode == "password":
-            identity_hint = (
-                self.t("prompt interactivo de ssh", "interactive ssh prompt")
-                if use_native_ssh_password_prompt or not resolved_password
-                else f"password via {password_env}"
-            )
+            identity_hint = self.t("contraseña SSH", "SSH password")
             kv("Identity", identity_hint, color=C.GRN)
         nl()
 
@@ -3214,21 +3173,11 @@ class OmniCore:
             render_human_error(
                 f"No se pudo inspeccionar el host remoto: {err}",
                 suggestion=self.t(
-                    "Sigue así: 1) ejecuta `omni continue` para reutilizar este destino; 2) si el host es Termux/Linux, elige `Linux / macOS / WSL`; 3) si usas contraseña y no quieres automatizarla, vuelve a intentar en una terminal interactiva; 4) si quieres automatización, instala `sshpass` o cambia a `SSH Agent / clave privada`.",
-                    "Next steps: 1) run `omni continue` to reuse this destination; 2) if the host is Termux/Linux, choose `Linux / macOS / WSL`; 3) if you use a password and do not need automation, retry in an interactive terminal; 4) if you want automation, install `sshpass` or switch to `SSH Agent / private key`.",
+                    "Sigue así: 1) ejecuta `omni continue` para reutilizar este destino; 2) verifica host, usuario, contraseña y puerto; 3) si usas un puerto distinto, escríbelo como `host:puerto`; 4) si el host usa OpenSSH en Windows, puedes pasar `--target-system windows`.",
+                    "Next steps: 1) run `omni continue` to reuse this destination; 2) verify host, user, password and port; 3) if you use a custom port, enter it as `host:port`; 4) if the host runs OpenSSH on Windows, you can pass `--target-system windows`.",
                 ),
             )
             return
-
-        if not remote.get("rsync_available", False) and resolved_transport in {"auto", "rsync"}:
-            warn(
-                self.t(
-                    "No vi `rsync` en el host remoto. Cambio automáticamente a SFTP para que la transferencia no se corte.",
-                    "I did not find `rsync` on the remote host. Automatically switching to SFTP so the transfer does not fail.",
-                )
-            )
-            resolved_transport = "sftp"
-            checkpoint_params["transport"] = resolved_transport
 
         freshness = "Servidor limpio" if remote.get("fresh_server") else ("Host Windows existente" if remote.get("system_family") == "windows" else "Host Unix existente")
         render_action_summary(
@@ -3239,7 +3188,7 @@ class OmniCore:
                 f"Entradas en HOME: {remote.get('home_entries', 0)}",
                 f"Repos Git: {remote.get('git_repos', 0)}",
                 f"Paquetes instalados: {remote.get('package_count', 0)}",
-                f"rsync remoto: {'sí' if remote.get('rsync_available') else 'no'}",
+                f"Transporte: paramiko+sftp",
                 f"Heurística: {freshness}",
             ],
             accent=C.GRN if remote.get("fresh_server") else C.YLW,
@@ -3298,8 +3247,8 @@ class OmniCore:
             render_human_error(
                 f"La transferencia falló: {err}",
                 suggestion=self.t(
-                    "Sigue así: 1) ejecuta `omni continue` para reintentar con este mismo destino; 2) si el host remoto no tiene rsync, usa o deja `SFTP`; 3) si el destino es Windows/OpenSSH, marca `Windows / PowerShell`.",
-                    "Next steps: 1) run `omni continue` to retry with the same destination; 2) if the remote host does not have rsync, use or keep `SFTP`; 3) if the target is Windows/OpenSSH, choose `Windows / PowerShell`.",
+                    "Sigue así: 1) ejecuta `omni continue` para reintentar con este mismo destino; 2) valida permisos del usuario remoto sobre `~/omni-transfer`; 3) si el host es Android/Termux, confirma que OpenSSH y el HOME remoto estén sanos.",
+                    "Next steps: 1) run `omni continue` to retry with the same destination; 2) validate remote user permissions over `~/omni-transfer`; 3) if the host is Android/Termux, confirm OpenSSH and the remote HOME are healthy.",
                 ),
             )
             return
@@ -3315,8 +3264,8 @@ class OmniCore:
             render_human_error(
                 result.get("stderr") or result.get("stdout") or "SSH transfer failed",
                 suggestion=self.t(
-                    "Sigue así: 1) ejecuta `omni continue` para reusar este destino; 2) valida permisos del directorio remoto; 3) si terminas en Termux o Windows/OpenSSH, SFTP suele ser la ruta más robusta.",
-                    "Next steps: 1) run `omni continue` to reuse this destination; 2) validate permissions on the remote directory; 3) if the target is Termux or Windows/OpenSSH, SFTP is usually the most robust path.",
+                    "Sigue así: 1) ejecuta `omni continue` para reusar este destino; 2) valida permisos del directorio remoto; 3) si el usuario remoto no puede escribir en su HOME, crea un directorio alterno y pásalo con `--remote-path`.",
+                    "Next steps: 1) run `omni continue` to reuse this destination; 2) validate permissions on the remote directory; 3) if the remote user cannot write to HOME, create an alternate directory and pass it with `--remote-path`.",
                 ),
             )
             return
@@ -3343,12 +3292,9 @@ class OmniCore:
         global_config = self.global_config()
         github_cfg = global_config.get("github") or {}
         tool_checks = {
-            "ssh": shutil.which("ssh"),
-            "sftp": shutil.which("sftp"),
-            "rsync": shutil.which("rsync"),
+            "paramiko": "python" if __import__("importlib").util.find_spec("paramiko") else "",
             "git": shutil.which("git"),
             "gh": shutil.which("gh"),
-            "sshpass": shutil.which("sshpass"),
         }
         warnings: List[str] = []
 
@@ -3392,14 +3338,10 @@ class OmniCore:
         section(self.t("Checks de runtime", "Runtime Checks"))
         for tool_name, path in tool_checks.items():
             kv(tool_name, path or "missing", color=C.GRN if path else C.YLW, key_width=14)
-        if not tool_checks["ssh"]:
-            warnings.append(self.t("Falta `ssh`; `omni connect` no podrá abrir conexiones remotas.", "Missing `ssh`; `omni connect` cannot open remote connections."))
-        if not tool_checks["sftp"]:
-            warnings.append(self.t("Falta `sftp`; los destinos Windows/OpenSSH quedarán limitados.", "Missing `sftp`; Windows/OpenSSH targets will be limited."))
+        if not tool_checks["paramiko"]:
+            warnings.append(self.t("Falta `paramiko`; `omni connect` no podrá abrir conexiones remotas.", "Missing `paramiko`; `omni connect` cannot open remote connections."))
         if not tool_checks["gh"] and not github_cfg.get("token"):
             warnings.append(self.t("No hay sesión de GitHub ni token guardado; la maleta no podrá subirse automáticamente.", "There is no GitHub session or saved token; the briefcase cannot be uploaded automatically."))
-        if not tool_checks["sshpass"]:
-            warnings.append(self.t("No está `sshpass`; la contraseña SSH seguirá funcionando solo con prompt interactivo.", "`sshpass` is missing; password-based SSH will only work with an interactive prompt."))
         if mem.get("available_mb", 0) and mem.get("available_mb", 0) < 1024:
             warnings.append(self.t(f"Memoria disponible baja: {mem.get('available_mb')} MB.", f"Low available memory: {mem.get('available_mb')} MB."))
         if disk.get("usage_percent", 0) and disk.get("usage_percent", 0) >= 85:

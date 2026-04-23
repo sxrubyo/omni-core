@@ -9,6 +9,7 @@ $RuntimeDir = if ($env:OMNI_RUNTIME_DIR) { $env:OMNI_RUNTIME_DIR } else { (Join-
 $BinDir = if ($env:OMNI_BIN_DIR) { $env:OMNI_BIN_DIR } else { (Join-Path $env:USERPROFILE ".local\bin") }
 $WrapperCmd = if ($env:OMNI_WRAPPER_PATH) { $env:OMNI_WRAPPER_PATH } else { (Join-Path $BinDir "omni.cmd") }
 $SkipBootstrap = if ($env:OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP) { $env:OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP } else { "0" }
+$AssumeYes = if ($env:OMNI_INSTALL_ASSUME_YES) { $env:OMNI_INSTALL_ASSUME_YES } else { "0" }
 
 function Write-Banner {
     Write-Host "╭──────────────────────────────────────────────────────────────╮" -ForegroundColor Blue
@@ -29,6 +30,24 @@ function Write-Ok([string]$Message) {
 function Fail([string]$Message) {
     Write-Host "  ERR $Message" -ForegroundColor Red
     exit 1
+}
+
+function Confirm-RuntimeDependencies {
+    if ($SkipBootstrap -eq "1") { return }
+    Write-Step "Preparing runtime dependencies"
+    Write-Host "  INFO Paramiko habilita conexiones SSH por contraseña y transferencias SFTP en omni connect." -ForegroundColor DarkCyan
+    Write-Host "  INFO También se instalarán rich, tqdm y prompt_toolkit para la interfaz del CLI." -ForegroundColor DarkCyan
+
+    if ($AssumeYes -eq "1" -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        Write-Ok "Runtime dependency bootstrap accepted automatically"
+        return
+    }
+
+    $Reply = Read-Host "Instalar dependencias runtime ahora? [Y/n]"
+    if ($Reply -match '^(n|no)$') {
+        Fail "Installation cancelled before runtime dependency bootstrap"
+    }
+    Write-Ok "Runtime dependency bootstrap accepted"
 }
 
 function Resolve-Python {
@@ -153,8 +172,9 @@ if (-not (Test-Path $RuntimePython)) {
     Fail "Python runtime not found at $RuntimePython"
 }
 if ($SkipBootstrap -ne "1") {
+    Confirm-RuntimeDependencies
     & $RuntimePython -m pip install --disable-pip-version-check --upgrade pip | Out-Null
-    & $RuntimePython -m pip install --disable-pip-version-check rich | Out-Null
+    & $RuntimePython -m pip install --disable-pip-version-check rich tqdm prompt_toolkit paramiko | Out-Null
 }
 Write-Ok "Runtime ready at $RuntimeDir"
 

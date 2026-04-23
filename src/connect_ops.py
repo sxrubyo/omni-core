@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
+import posixpath
+import shlex
+import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
+
+try:  # pragma: no cover - exercised through runtime and integration tests
+    import paramiko
+except ModuleNotFoundError:  # pragma: no cover - handled at runtime
+    paramiko = None
 
 
 @dataclass(frozen=True)
@@ -18,8 +20,8 @@ class SSHDestination:
     user: str
     port: int = 22
     key_path: str = ""
-    auth_mode: str = "agent"
-    password: str = ""
+    auth_mode: str = "password"
+    password: str | None = None
     target_system: str = "auto"
 
     def target(self) -> str:
@@ -53,45 +55,21 @@ def normalize_remote_system(value: str | None) -> str:
 
 
 def normalize_auth_mode(destination: SSHDestination) -> str:
+    if destination.password is not None:
+        return "password"
     if destination.key_path:
         return "key"
     mode = str(destination.auth_mode or "").strip().lower()
-    return mode if mode in {"agent", "key", "password"} else "agent"
+    return mode if mode in {"password", "key"} else "password"
 
 
-def _ssh_base_command(destination: SSHDestination) -> List[str]:
-    args = ["ssh", "-p", str(destination.port)]
-    auth_mode = normalize_auth_mode(destination)
-    if auth_mode == "key" and destination.key_path:
-        args.extend(["-i", destination.key_path])
-    if auth_mode == "password":
-        args.extend(
-            [
-                "-o",
-                "BatchMode=no",
-                "-o",
-                "PreferredAuthentications=password",
-                "-o",
-                "PubkeyAuthentication=no",
-            ]
+def _require_paramiko():
+    if paramiko is None:
+        raise RuntimeError(
+            "Paramiko no está instalado. Ejecuta `python3 -m pip install paramiko` "
+            "o reinstala OmniSync para habilitar `omni connect`."
         )
-    else:
-        args.extend(["-o", "BatchMode=yes"])
-    args.extend(
-        [
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            destination.target(),
-        ]
-    )
-    return args
-
-
-def _can_prompt_interactively() -> bool:
-    try:
-        return bool(sys.stdin.isatty()) and bool(sys.stderr.isatty())
-    except Exception:
-        return False
+    return paramiko
 
 
 def parse_remote_probe_output(raw: str) -> Dict[str, Any]:
@@ -102,7 +80,6 @@ def parse_remote_probe_output(raw: str) -> Dict[str, Any]:
         "git_repos": 0,
         "package_count": 0,
         "fresh_server": False,
-        "rsync_available": False,
         "home": "",
     }
     for line in str(raw or "").splitlines():
@@ -116,7 +93,7 @@ def parse_remote_probe_output(raw: str) -> Dict[str, Any]:
                 payload[key] = int(value)
             except ValueError:
                 payload[key] = 0
-        elif key in {"fresh_server", "rsync_available"}:
+        elif key == "fresh_server":
             payload[key] = value.lower() in {"1", "true", "yes"}
         else:
             payload[key] = value
@@ -136,10 +113,6 @@ for candidate in apt-get apt dnf yum pacman apk zypper brew; do
 done
 printf 'package_manager=%s\n' "$pkg"
 printf 'home=%s\n' "${HOME:-}"
-rsync_available=false
-if command -v rsync >/dev/null 2>&1; then
-  rsync_available=true
-fi
 home_entries="$(find "${HOME:-.}" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
 git_repos="$(find "${HOME:-.}" -maxdepth 3 -name .git -type d 2>/dev/null | wc -l | tr -d ' ')"
 package_count=0
@@ -158,19 +131,17 @@ printf 'home_entries=%s\n' "${home_entries:-0}"
 printf 'git_repos=%s\n' "${git_repos:-0}"
 printf 'package_count=%s\n' "${package_count:-0}"
 printf 'fresh_server=%s\n' "$fresh"
-printf 'rsync_available=%s\n' "$rsync_available"
 """
 
 
 def build_windows_probe_script() -> str:
-    return (
-        'powershell -NoProfile -NonInteractive -Command '
-        '"$ErrorActionPreference=\'SilentlyContinue\'; '
+    script = (
+        "$ErrorActionPreference='SilentlyContinue'; "
         "$homePath=$HOME; "
         "$pkg='unknown'; "
         "foreach($candidate in @('winget','choco','scoop')){ if(Get-Command $candidate -ErrorAction SilentlyContinue){ $pkg=$candidate; break } } "
         "$homeEntries=0; if($homePath -and (Test-Path $homePath)){ $homeEntries=(Get-ChildItem -LiteralPath $homePath -Force -ErrorAction SilentlyContinue | Measure-Object).Count }; "
-        "$gitRepos=0; if($homePath -and (Test-Path $homePath)){ $gitRepos=(Get-ChildItem -LiteralPath $homePath -Directory -Filter ''.git'' -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count }; "
+        "$gitRepos=0; if($homePath -and (Test-Path $homePath)){ $gitRepos=(Get-ChildItem -LiteralPath $homePath -Directory -Filter '.git' -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count }; "
         "$packageCount=0; "
         "$fresh='false'; if(($homeEntries -le 6) -and ($gitRepos -eq 0)){ $fresh='true' }; "
         "Write-Output ('system=Windows'); "
@@ -179,100 +150,129 @@ def build_windows_probe_script() -> str:
         "Write-Output ('home_entries=' + $homeEntries); "
         "Write-Output ('git_repos=' + $gitRepos); "
         "Write-Output ('package_count=' + $packageCount); "
-        "Write-Output ('fresh_server=' + $fresh); "
-        "Write-Output ('rsync_available=false')"
-        '"'
+        "Write-Output ('fresh_server=' + $fresh)"
     )
+    return f"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {shlex.quote(script)}"
 
 
-def _wrap_command_with_auth(
-    command: List[str],
+def _connect_client(
     destination: SSHDestination,
     *,
-    allow_interactive_password: bool = False,
-) -> tuple[List[str], Dict[str, str] | None, bool]:
-    auth_mode = normalize_auth_mode(destination)
-    if auth_mode != "password":
-        return command, None, False
-
-    if destination.password and shutil.which("sshpass"):
-        env = os.environ.copy()
-        env["SSHPASS"] = destination.password
-        return ["sshpass", "-e", *command], env, False
-
-    if allow_interactive_password and _can_prompt_interactively():
-        return command, None, True
-
-    if destination.password:
-        raise RuntimeError(
-            "La autenticación por contraseña requiere `sshpass` para automatizarse. "
-            "En una terminal interactiva Omni puede usar el prompt nativo de `ssh`; "
-            "fuera de eso usa SSH agent, una clave privada o instala `sshpass`."
-        )
-    raise RuntimeError("Falta la contraseña SSH para continuar en modo password.")
-
-
-def _run_password_interactive_command(
-    command: List[str],
-    *,
     timeout: int,
-    runner: Any,
-    env: Dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    stdout_fd, stdout_name = tempfile.mkstemp(prefix="omni-ssh-probe-", suffix=".log")
-    os.close(stdout_fd)
-    stdout_path = Path(stdout_name)
-    try:
-        with stdout_path.open("w", encoding="utf-8") as stdout_file:
-            result = runner(
-                command,
-                stdout=stdout_file,
-                stderr=None,
-                text=True,
-                check=False,
-                timeout=timeout,
-                env=env,
-            )
-        stdout = stdout_path.read_text(encoding="utf-8")
-        stderr = str(getattr(result, "stderr", "") or "")
-        return subprocess.CompletedProcess(command, getattr(result, "returncode", 1), stdout, stderr)
-    finally:
-        stdout_path.unlink(missing_ok=True)
+    client_factory: Any = None,
+):
+    lib = _require_paramiko()
+    client = client_factory() if client_factory else lib.SSHClient()
+    client.set_missing_host_key_policy(lib.AutoAddPolicy())
+
+    connect_kwargs: Dict[str, Any] = {
+        "hostname": destination.host,
+        "port": int(destination.port or 22),
+        "username": destination.user,
+        "timeout": timeout,
+        "banner_timeout": timeout,
+        "auth_timeout": timeout,
+    }
+
+    if destination.password is not None:
+        connect_kwargs["password"] = destination.password
+        connect_kwargs["look_for_keys"] = False
+        connect_kwargs["allow_agent"] = False
+    else:
+        connect_kwargs["look_for_keys"] = True
+        connect_kwargs["allow_agent"] = True
+        if destination.key_path:
+            connect_kwargs["key_filename"] = destination.key_path
+
+    client.connect(**connect_kwargs)
+    return client
+
+
+def _read_stream(stream: Any) -> str:
+    payload = stream.read()
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    return str(payload or "")
+
+
+def _run_remote_command(client: Any, command: str, *, timeout: int) -> tuple[int, str, str]:
+    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    exit_status = stdout.channel.recv_exit_status()
+    return exit_status, _read_stream(stdout), _read_stream(stderr)
 
 
 def probe_remote_host(
     destination: SSHDestination,
     *,
     timeout: int = 30,
-    runner: Any = subprocess.run,
+    client_factory: Any = None,
 ) -> Dict[str, Any]:
     system_hint = normalize_remote_system(destination.target_system)
     attempts = [system_hint] if system_hint != "auto" else ["posix", "windows"]
     errors: list[str] = []
-
-    for attempt in attempts:
-        script = build_windows_probe_script() if attempt == "windows" else build_posix_probe_script()
-        command, env, interactive_password = _wrap_command_with_auth(
-            _ssh_base_command(destination) + [script],
-            destination,
-            allow_interactive_password=True,
-        )
-        try:
-            if interactive_password:
-                result = _run_password_interactive_command(command, timeout=timeout, runner=runner, env=env)
-            else:
-                result = runner(command, capture_output=True, text=True, check=False, timeout=timeout, env=env)
-        except subprocess.TimeoutExpired:
-            errors.append(f"{attempt}: timed out after {timeout} seconds")
-            continue
-        if result.returncode == 0:
-            payload = parse_remote_probe_output(result.stdout)
-            payload["system_family"] = attempt
-            return payload
-        stderr = result.stderr.strip() or result.stdout.strip() or "SSH probe failed"
-        errors.append(f"{attempt}: {stderr}")
+    client = _connect_client(destination, timeout=timeout, client_factory=client_factory)
+    try:
+        for attempt in attempts:
+            command = (
+                f"sh -lc {shlex.quote(build_posix_probe_script())}"
+                if attempt == "posix"
+                else build_windows_probe_script()
+            )
+            status, stdout, stderr = _run_remote_command(client, command, timeout=timeout)
+            if status == 0:
+                payload = parse_remote_probe_output(stdout)
+                payload["system_family"] = attempt
+                return payload
+            errors.append(f"{attempt}: {(stderr or stdout or 'SSH probe failed').strip()}")
+    finally:
+        client.close()
 
     raise RuntimeError(" | ".join(errors) if errors else "SSH probe failed")
+
+
+def _resolve_remote_path(sftp: Any, remote_path: str) -> str:
+    requested = str(remote_path or "").strip()
+    home = str(sftp.normalize("."))
+    if not requested or requested == "~":
+        return home
+    if requested.startswith("~/"):
+        return posixpath.join(home, requested[2:])
+    return requested
+
+
+def _mkdir_p(sftp: Any, remote_dir: str) -> None:
+    parts: list[str] = []
+    current = remote_dir
+    while current and current not in {"/", "."}:
+        parts.append(current)
+        current = posixpath.dirname(current)
+        if current == parts[-1]:
+            break
+    for path in reversed(parts):
+        try:
+            sftp.stat(path)
+        except IOError:
+            sftp.mkdir(path)
+
+
+def _put_file(sftp: Any, source: Path, remote_dir: str) -> None:
+    _mkdir_p(sftp, remote_dir)
+    remote_file = posixpath.join(remote_dir, source.name)
+    sftp.put(str(source), remote_file)
+    try:
+        sftp.chmod(remote_file, stat.S_IMODE(source.stat().st_mode))
+    except IOError:
+        pass
+
+
+def _put_path(sftp: Any, source: Path, remote_root: str) -> None:
+    if source.is_dir():
+        remote_dir = posixpath.join(remote_root, source.name)
+        _mkdir_p(sftp, remote_dir)
+        for child in sorted(source.iterdir(), key=lambda item: item.name):
+            _put_path(sftp, child, remote_dir)
+        return
+    _put_file(sftp, source, remote_root)
 
 
 def build_rsync_command(
@@ -281,16 +281,13 @@ def build_rsync_command(
     *,
     remote_path: str,
 ) -> List[str]:
-    ssh_transport = f"ssh -p {destination.port}"
-    auth_mode = normalize_auth_mode(destination)
-    if auth_mode == "key" and destination.key_path:
-        ssh_transport += f" -i {destination.key_path}"
-    if auth_mode == "password":
-        ssh_transport += " -o PreferredAuthentications=password -o PubkeyAuthentication=no"
-    command = ["rsync", "-az", "--info=progress2", "-e", ssh_transport]
-    command.extend(list(source_paths))
-    command.append(f"{destination.target()}:{remote_path.rstrip('/')}/")
-    return command
+    return [
+        "paramiko",
+        "sftp",
+        destination.target(),
+        remote_path,
+        *list(source_paths),
+    ]
 
 
 def build_sftp_command(
@@ -299,22 +296,7 @@ def build_sftp_command(
     *,
     remote_path: str,
 ) -> tuple[List[str], str]:
-    lines = [f"mkdir {remote_path}", f"cd {remote_path}"]
-    for source in source_paths:
-        resolved = Path(source)
-        if resolved.is_dir():
-            lines.append(f"put -r {resolved}")
-        else:
-            lines.append(f"put {resolved}")
-    batch = "\n".join(lines) + "\n"
-    command = ["sftp", "-P", str(destination.port)]
-    auth_mode = normalize_auth_mode(destination)
-    if auth_mode == "key" and destination.key_path:
-        command.extend(["-i", destination.key_path])
-    if auth_mode == "password":
-        command.extend(["-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"])
-    command.extend(["-b", "-", destination.target()])
-    return command, batch
+    return build_rsync_command(source_paths, destination, remote_path=remote_path), ""
 
 
 def transfer_payload(
@@ -322,57 +304,34 @@ def transfer_payload(
     destination: SSHDestination,
     *,
     remote_path: str,
-    transport: str = "rsync",
+    transport: str = "sftp",
     timeout: int = 1200,
-    runner: Any = subprocess.run,
+    client_factory: Any = None,
 ) -> Dict[str, Any]:
     if not source_paths:
         raise ValueError("At least one source path is required")
 
-    resolved_transport = transport.lower().strip()
-    if resolved_transport in {"", "auto", "scp"}:
-        resolved_transport = "sftp" if normalize_remote_system(destination.target_system) == "windows" else "rsync"
-    if resolved_transport == "rsync" and not shutil.which("rsync"):
-        resolved_transport = "sftp"
-
-    if resolved_transport == "rsync":
-        command = build_rsync_command(source_paths, destination, remote_path=remote_path)
-        command, env, interactive_password = _wrap_command_with_auth(
-            command,
-            destination,
-            allow_interactive_password=True,
-        )
-        if interactive_password:
-            result = runner(command, text=True, check=False, timeout=timeout, env=env)
-        else:
-            result = runner(command, capture_output=True, text=True, check=False, timeout=timeout, env=env)
-    elif resolved_transport == "sftp":
-        command, batch = build_sftp_command(source_paths, destination, remote_path=remote_path)
-        command, env, interactive_password = _wrap_command_with_auth(
-            command,
-            destination,
-            allow_interactive_password=True,
-        )
-        if interactive_password:
-            batch_fd, batch_name = tempfile.mkstemp(prefix="omni-sftp-", suffix=".batch")
-            os.close(batch_fd)
-            batch_path = Path(batch_name)
-            try:
-                batch_path.write_text(batch, encoding="utf-8")
-                command_with_batch = [str(batch_path) if token == "-" else token for token in command]
-                result = runner(command_with_batch, text=True, check=False, timeout=timeout, env=env)
-                command = command_with_batch
-            finally:
-                batch_path.unlink(missing_ok=True)
-        else:
-            result = runner(command, input=batch, capture_output=True, text=True, check=False, timeout=timeout, env=env)
-    else:
-        raise ValueError(f"Unsupported transport: {transport}")
+    client = _connect_client(destination, timeout=timeout, client_factory=client_factory)
+    uploaded: List[str] = []
+    try:
+        sftp = client.open_sftp()
+        resolved_remote_root = _resolve_remote_path(sftp, remote_path)
+        _mkdir_p(sftp, resolved_remote_root)
+        for raw_source in source_paths:
+            source = Path(raw_source).expanduser().resolve()
+            if not source.exists():
+                raise FileNotFoundError(f"Source path not found: {source}")
+            _put_path(sftp, source, resolved_remote_root)
+            uploaded.append(source.name)
+        sftp.close()
+    finally:
+        client.close()
 
     return {
-        "success": result.returncode == 0,
-        "transport": resolved_transport,
-        "command": command,
-        "stdout": str(getattr(result, "stdout", "") or "").strip(),
-        "stderr": str(getattr(result, "stderr", "") or "").strip(),
+        "success": True,
+        "transport": "sftp",
+        "command": ["paramiko", "sftp", destination.target(), remote_path],
+        "stdout": "\n".join(uploaded),
+        "stderr": "",
+        "remote_path": remote_path,
     }

@@ -172,7 +172,7 @@ class GitHubCliSurfaceTests(unittest.TestCase):
                 profile="full-home",
             )
 
-    def test_connect_cmd_password_without_sshpass_uses_native_prompt_path(self) -> None:
+    def test_connect_cmd_password_uses_prompt_and_transfers_with_paramiko_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             briefcase_path = Path(tmp) / "briefcase.json"
             briefcase_path.write_text("{}", encoding="utf-8")
@@ -186,7 +186,7 @@ class GitHubCliSurfaceTests(unittest.TestCase):
                 stack.enter_context(mock.patch("omni_core.info"))
                 stack.enter_context(mock.patch("omni_core.render_action_summary"))
                 error_mock = stack.enter_context(mock.patch("omni_core.render_human_error"))
-                stack.enter_context(mock.patch("omni_core.shutil.which", side_effect=lambda name: None if name == "sshpass" else f"/usr/bin/{name}"))
+                getpass_mock = stack.enter_context(mock.patch("omni_core.getpass.getpass", return_value="super-secret"))
                 stack.enter_context(
                     mock.patch(
                         "omni_core.probe_remote_host",
@@ -221,6 +221,7 @@ class GitHubCliSurfaceTests(unittest.TestCase):
                 )
 
             error_mock.assert_not_called()
+            getpass_mock.assert_called_once()
             transfer_mock.assert_called_once()
 
 

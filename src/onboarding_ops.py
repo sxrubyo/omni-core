@@ -104,7 +104,7 @@ def build_flow_options(platform_info: PlatformInfo | None = None) -> list[FlowOp
     info = platform_info or detect_platform_info()
     recommended = recommended_start_flow(info)
     return [
-        FlowOption("connect", "SSH Connect", "Conecta dos máquinas por SSH, detecta el host remoto y envía la maleta.", recommended == "connect"),
+        FlowOption("connect", "SSH Connect", "Conecta dos máquinas por SSH con Paramiko, detecta el host remoto y envía la maleta.", recommended == "connect"),
         FlowOption("briefcase", "Maleta", "Empaqueta el inventario portátil del sistema y genera el restore script.", recommended == "briefcase"),
         FlowOption("restore", "Restore", "Restaura el host destino desde bundles, secretos y dependencias base.", recommended == "restore"),
         FlowOption("migrate-sync", "Migrate Sync", "Reconstruye o mueve un host completo con create/plan/capture/restore.", recommended == "migrate-sync"),

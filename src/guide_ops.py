@@ -22,7 +22,7 @@ def build_guide_entries() -> List[GuideEntry]:
         GuideEntry(
             key="connect",
             title="SSH Connect",
-            description="Conecta dos máquinas por SSH, detecta el host remoto y envía la maleta con rsync o SFTP.",
+            description="Conecta dos máquinas por SSH con Paramiko, detecta el host remoto y envía la maleta por SFTP.",
             estimated_time="2-5 min",
             command="omni connect",
         ),

@@ -15,6 +15,7 @@ else
 fi
 REPAIRED_OMNI_PATH=""
 SKIP_DEP_BOOTSTRAP="${OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP:-0}"
+ASSUME_YES="${OMNI_INSTALL_ASSUME_YES:-0}"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -37,6 +38,27 @@ fail() {
 
 ensure_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+confirm_runtime_dependencies() {
+  [ "$SKIP_DEP_BOOTSTRAP" = "1" ] && return 0
+  say "Preparing runtime dependencies"
+  printf '  INFO Paramiko habilita conexiones SSH por contraseña y transferencias SFTP en omni connect.\n'
+  printf '  INFO También instalaré rich, tqdm y prompt_toolkit para la interfaz del CLI.\n'
+  if [ "$ASSUME_YES" = "1" ] || ! [ -t 0 ] || ! [ -t 1 ]; then
+    ok "Runtime dependency bootstrap accepted automatically"
+    return 0
+  fi
+  printf '  ? Instalar dependencias runtime ahora? [Y/n] '
+  read -r reply
+  case "${reply:-Y}" in
+    [Nn]*)
+      fail "Installation cancelled before runtime dependency bootstrap"
+      ;;
+    *)
+      ok "Runtime dependency bootstrap accepted"
+      ;;
+  esac
 }
 
 sync_repo_tree() {
@@ -128,8 +150,9 @@ bootstrap_runtime() {
   if [ "$SKIP_DEP_BOOTSTRAP" = "1" ]; then
     return
   fi
+  confirm_runtime_dependencies
   "$RUNTIME_DIR/bin/pip" install --disable-pip-version-check --upgrade pip >/dev/null
-  "$RUNTIME_DIR/bin/pip" install --disable-pip-version-check rich tqdm prompt_toolkit >/dev/null
+  "$RUNTIME_DIR/bin/pip" install --disable-pip-version-check rich tqdm prompt_toolkit paramiko >/dev/null
 }
 
 write_wrapper() {
