@@ -12,11 +12,8 @@ $SkipBootstrap = if ($env:OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP) { $env:OMNI_IN
 $AssumeYes = if ($env:OMNI_INSTALL_ASSUME_YES) { $env:OMNI_INSTALL_ASSUME_YES } else { "0" }
 
 function Write-Banner {
-    Write-Host "╭──────────────────────────────────────────────────────────────╮" -ForegroundColor Blue
-    Write-Host "│  .      *        .      OMNISYNC // launch vector          │" -ForegroundColor Blue
-    Write-Host "│     portable migration bootstrap for real host moves       │" -ForegroundColor Blue
-    Write-Host "│  ssh • maleta • restore • agent • migrate sync             │" -ForegroundColor Blue
-    Write-Host "╰──────────────────────────────────────────────────────────────╯" -ForegroundColor Blue
+    Write-Host "OmniSync installer" -ForegroundColor Cyan
+    Write-Host "portable migration bootstrap" -ForegroundColor DarkGray
 }
 
 function Write-Step([string]$Message) {
@@ -123,6 +120,79 @@ for child in source.iterdir():
     Invoke-Python -PythonCommand $PythonCommand -Arguments @("-c", $script, $SourceDir, $TargetDir)
 }
 
+function Stage-RepoArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipFile,
+        [Parameter(Mandatory = $true)][string]$TargetDir,
+        [Parameter(Mandatory = $true)][string]$PythonCommand
+    )
+
+    $script = @'
+from pathlib import Path, PurePosixPath
+import shutil
+import sys
+import zipfile
+
+zip_path = Path(sys.argv[1])
+target = Path(sys.argv[2])
+exclude_roots = {
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    ".env",
+    "runtime",
+    "logs",
+    "data",
+    "backups",
+    "home_snapshot",
+    "home_private_snapshot",
+}
+exclude_paths = {
+    "config/repos.json",
+    "config/servers.json",
+    "config/system_manifest.json",
+    "config/omni_agent.json",
+    "config/omni_agent_activation.txt",
+}
+
+if target.exists():
+    shutil.rmtree(target)
+target.mkdir(parents=True, exist_ok=True)
+
+found_entrypoint = False
+with zipfile.ZipFile(zip_path) as archive:
+    for info in archive.infolist():
+        raw_name = str(info.filename or "").replace("\\", "/")
+        if not raw_name or raw_name.endswith("/"):
+            continue
+        parts = PurePosixPath(raw_name).parts
+        if len(parts) < 2:
+            continue
+        rel_parts = parts[1:]
+        if not rel_parts:
+            continue
+        rel_path = PurePosixPath(*rel_parts)
+        rel_str = rel_path.as_posix()
+        if rel_parts[0] in exclude_roots:
+            continue
+        if rel_str in exclude_paths:
+            continue
+        if ".pytest_cache" in rel_parts or "__pycache__" in rel_parts:
+            continue
+        destination = target.joinpath(*rel_parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(info, "r") as source, destination.open("wb") as output:
+            shutil.copyfileobj(source, output)
+        if rel_str == "src/omni_core.py":
+            found_entrypoint = True
+
+if not found_entrypoint:
+    raise SystemExit("Downloaded archive does not contain src/omni_core.py")
+'@
+
+    Invoke-Python -PythonCommand $PythonCommand -Arguments @("-c", $script, $ZipFile, $TargetDir)
+}
+
 $Python = Resolve-Python
 if (-not $Python) {
     Fail "Python 3 no está disponible. Instálalo y vuelve a intentar."
@@ -134,7 +204,7 @@ $PythonExecutable = if ($Python -eq "py -3") {
     & $Python -c "import sys; print(sys.executable)"
 }
 
-$TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("omnisync-" + [guid]::NewGuid().ToString("N"))
+$TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("omni-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $TempRoot | Out-Null
 $ZipPath = Join-Path $TempRoot "omnisync.zip"
 
@@ -156,12 +226,7 @@ if (-not [string]::IsNullOrWhiteSpace($LocalRepo)) {
     Write-Ok "Archive downloaded"
 
     Write-Step "Extracting OmniSync"
-    Expand-Archive -Path $ZipPath -DestinationPath $TempRoot -Force
-    $Expanded = Get-ChildItem -Path $TempRoot -Directory | Where-Object { Test-Path (Join-Path $_.FullName "src\omni_core.py") } | Select-Object -First 1
-    if (-not $Expanded) {
-        Fail "Downloaded archive does not contain src\\omni_core.py"
-    }
-    Sync-RepoTree -SourceDir $Expanded.FullName -TargetDir $RepoDir -PythonCommand $Python
+    Stage-RepoArchive -ZipFile $ZipPath -TargetDir $RepoDir -PythonCommand $Python
     Write-Ok "Repository staged in $RepoDir"
 }
 

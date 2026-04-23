@@ -23,6 +23,8 @@ class InstallDistributionTests(unittest.TestCase):
         self.assertIn("omni.cmd", contents)
         self.assertIn("Get-Command omni", contents)
         self.assertIn("Paramiko habilita conexiones SSH por contraseña", contents)
+        self.assertIn("zipfile.ZipFile", contents)
+        self.assertNotIn("Expand-Archive -Path $ZipPath -DestinationPath $TempRoot -Force", contents)
 
     def test_readme_mentions_windows_install_command(self) -> None:
         contents = README.read_text(encoding="utf-8")
