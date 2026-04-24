@@ -20,6 +20,7 @@ class NpmDistributionTests(unittest.TestCase):
         self.assertEqual(payload.get("bin", {}).get("omni"), "npm/omni.js")
         self.assertEqual(payload.get("publishConfig", {}).get("access"), "public")
         self.assertIn("install.ps1", payload.get("files", []))
+        self.assertEqual(payload.get("scripts", {}).get("postinstall"), "node npm/postinstall.js")
 
     @unittest.skipUnless(shutil.which("npm"), "npm is required")
     def test_npm_pack_dry_run_succeeds(self) -> None:
@@ -38,6 +39,7 @@ class NpmDistributionTests(unittest.TestCase):
         self.assertIn(".codex/skills/omni-sync/SKILL.md", files)
         self.assertIn("package.json", files)
         self.assertIn("npm/omni.js", files)
+        self.assertIn("npm/postinstall.js", files)
         self.assertIn("install.sh", files)
         self.assertIn("install.ps1", files)
         self.assertNotIn("config/repos.json", files)
@@ -78,3 +80,33 @@ class NpmDistributionTests(unittest.TestCase):
         self.assertIn('"OMNI_HOME"', script)
         self.assertIn("findSystemPython", script)
         self.assertIn("install.ps1", (REPO_ROOT / "package.json").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_npm_postinstall_repairs_local_bin_wrappers(self) -> None:
+        home_root = REPO_ROOT / ".tmp" / "npm-postinstall-home"
+        if home_root.exists():
+            shutil.rmtree(home_root)
+        self.addCleanup(shutil.rmtree, home_root, ignore_errors=True)
+        home_root.mkdir(parents=True, exist_ok=True)
+
+        env = {
+            **dict(os.environ),
+            "HOME": str(home_root),
+        }
+        result = subprocess.run(
+            ["node", "npm/postinstall.js"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+        local_bin = home_root / ".local" / "bin"
+        ps1_wrapper = (local_bin / "omni.ps1").read_text(encoding="utf-8")
+        cmd_wrapper = (local_bin / "omni.cmd").read_text(encoding="utf-8")
+        sh_wrapper = (local_bin / "omni").read_text(encoding="utf-8")
+        self.assertIn("npm/omni.js", ps1_wrapper)
+        self.assertIn("npm/omni.js", cmd_wrapper)
+        self.assertIn("npm/omni.js", sh_wrapper)
+        self.assertNotIn("Downloads\\Proyectos\\Ubuntu\\omni-core", ps1_wrapper)

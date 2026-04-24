@@ -312,7 +312,7 @@ def verbose(msg):
 # BRANDING
 # ══════════════════════════════════════════════════════════════════════════════
 
-OMNI_VERSION = "2.1.2"
+OMNI_VERSION = "2.1.3"
 OMNI_BUILD = "2026.03.portable"
 OMNI_CODENAME = "Titan"
 
