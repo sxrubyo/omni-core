@@ -100,7 +100,7 @@ from onboarding_ops import build_flow_options, normalize_flow_choice, should_acc
 from platform_ops import detect_platform_info
 from reconcile_ops import install_systemd_service, install_systemd_timer, reconcile_host
 from watch_ops import capture_watch_snapshot, load_watch_snapshot, save_watch_snapshot, summarize_snapshot_diff
-from runtime_inventory_ops import load_installed_inventory
+from runtime_inventory_ops import load_installed_inventory, summarize_installed_inventory
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -317,7 +317,7 @@ def verbose(msg):
 # BRANDING
 # ══════════════════════════════════════════════════════════════════════════════
 
-OMNI_VERSION = "2.1.6"
+OMNI_VERSION = "2.1.7"
 OMNI_BUILD = "2026.03.portable"
 OMNI_CODENAME = "Titan"
 
@@ -2236,21 +2236,143 @@ class OmniCore:
         )
         hint("Usa `omni chat` para hablar con el agente y permitirle ejecutar comandos `omni` en tu nombre.")
 
+    def build_chat_workspace_context(self) -> Dict[str, Any]:
+        def list_entries(path: Path, *, limit: int = 8) -> List[str]:
+            try:
+                values: List[str] = []
+                for entry in sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+                    if entry.name.startswith(".") and entry.name not in {".codex", ".claude", ".gemini", ".opencode", ".ssh", ".omni"}:
+                        continue
+                    suffix = "/" if entry.is_dir() else ""
+                    values.append(f"{entry.name}{suffix}")
+                    if len(values) >= limit:
+                        break
+                return values
+            except Exception:
+                return []
+
+        runtime_inventory = load_installed_inventory(STATE_DIR)
+        cwd = Path.cwd()
+        return {
+            "cwd": str(cwd),
+            "home": str(Path.home()),
+            "omni_home": str(OMNI_HOME),
+            "cwd_entries": list_entries(cwd),
+            "home_entries": list_entries(Path.home()),
+            "inventory_summary": summarize_installed_inventory(runtime_inventory)[:4] if runtime_inventory else [],
+        }
+
+    def _build_chat_runtime_messages(self, session: Dict[str, Any], memory: Dict[str, Any]) -> List[Dict[str, str]]:
+        runtime_messages = list(session.get("messages") or [])
+        memory_prompt = build_chat_memory_prompt(memory)
+        if runtime_messages and runtime_messages[0].get("role") == "system":
+            return [runtime_messages[0], {"role": "system", "content": memory_prompt}, *runtime_messages[1:]]
+        return [{"role": "system", "content": memory_prompt}, *runtime_messages]
+
+    def _validate_agent_shell_command(self, argv: List[str]) -> Tuple[bool, str]:
+        if not argv:
+            return False, "Falta el comando para Omni Agent."
+
+        base = Path(argv[0]).name.lower()
+        always_safe = {
+            "pwd",
+            "whoami",
+            "hostname",
+            "uname",
+            "id",
+            "ls",
+            "find",
+            "cat",
+            "head",
+            "tail",
+            "stat",
+            "df",
+            "du",
+            "env",
+            "printenv",
+            "rg",
+            "tree",
+            "lsblk",
+            "mount",
+        }
+        if base in always_safe:
+            return True, ""
+
+        if base == "git" and len(argv) >= 2:
+            subcommand = argv[1]
+            if subcommand == "remote":
+                return len(argv) == 2 or argv[2:] == ["-v"], ""
+            return subcommand in {"status", "branch", "rev-parse", "log", "ls-files", "show", "diff"}, ""
+
+        if base in {"python", "python3", "node"}:
+            return (len(argv) == 2 and argv[1] in {"--version", "-V"}), ""
+
+        if base in {"pip", "pip3"} and len(argv) >= 2:
+            return argv[1] in {"list", "show"}, ""
+
+        if base == "npm" and len(argv) >= 2:
+            return argv[1] in {"list", "root", "prefix"}, ""
+
+        if base == "docker" and len(argv) >= 2:
+            return argv[1] in {"ps", "images", "inspect", "info", "version"}, ""
+
+        if base == "systemctl" and len(argv) >= 2:
+            return argv[1] in {"status", "show", "list-units", "list-unit-files", "is-active", "is-enabled"}, ""
+
+        if base == "crontab":
+            return argv[1:] == ["-l"], ""
+
+        if base == "pm2" and len(argv) >= 2:
+            return argv[1] in {"list", "jlist", "describe", "show", "ping", "status"}, ""
+
+        if base == "code":
+            return len(argv) == 2 and argv[1] in {"--list-extensions", "--version"}, ""
+
+        return False, "Omni Agent solo puede ejecutar `omni ...` o comandos seguros de inspección del host."
+
     def run_agent_omni_command(self, command: str) -> Dict[str, Any]:
         normalized = " ".join(str(command or "").strip().split())
-        if not normalized.startswith("omni "):
-            return {"success": False, "error": "Omni Agent solo puede ejecutar comandos que empiecen por `omni `."}
+        if not normalized:
+            return {"success": False, "error": "Falta el comando para Omni Agent."}
 
-        argv = shlex.split(normalized)
+        try:
+            argv = shlex.split(normalized, posix=(os.name != "nt"))
+        except ValueError as err:
+            return {"success": False, "error": f"Comando inválido para Omni Agent: {err}"}
+        if normalized.startswith("omni "):
+            if self.is_dry_run():
+                return {"success": True, "stdout": "", "stderr": "", "returncode": 0, "command": normalized, "dry_run": True}
+
+            result = subprocess.run(
+                [sys.executable, str(APP_DIR / "src" / "omni_core.py"), *argv[1:]],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(APP_DIR),
+            )
+            return {
+                "success": result.returncode == 0,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "command": normalized,
+                "dry_run": False,
+            }
+
+        is_safe, error = self._validate_agent_shell_command(argv)
+        if not is_safe:
+            return {"success": False, "error": error}
+
         if self.is_dry_run():
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0, "command": normalized, "dry_run": True}
 
         result = subprocess.run(
-            [sys.executable, str(APP_DIR / "src" / "omni_core.py"), *argv[1:]],
+            argv,
             capture_output=True,
             text=True,
             check=False,
-            cwd=str(APP_DIR),
+            cwd=str(Path.cwd()),
+            timeout=45,
         )
         return {
             "success": result.returncode == 0,
@@ -2262,8 +2384,21 @@ class OmniCore:
         }
 
     def chat_cmd(self, prompt: str = "", *, accept_all: bool = False) -> None:
-        print_logo(compact=True)
-        section("Omni Chat")
+        render_command_header(
+            "Omni Chat",
+            "Conversation, memory and terminal control",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
+        render_action_summary(
+            "Operator Session",
+            [
+                "Omni Agent puede inspeccionar el host, leer archivos visibles y ejecutar `omni ...` o comandos seguros.",
+                "Atajos: /memory para contexto, /clear para reiniciar sesión, /exit para salir.",
+                "Si falta un dato crítico, preguntará solo lo necesario antes de seguir operando.",
+            ],
+            accent=C.PRIMARY,
+        )
         config = load_agent_config(AGENT_CONFIG_FILE)
         if not config:
             render_human_error(
@@ -2312,7 +2447,7 @@ class OmniCore:
 
         interactive_loop = not prompt.strip() and self.is_interactive()
         if interactive_loop:
-            hint("Sesión interactiva abierta. Usa /exit para salir, /memory para ver memoria y /clear para limpiar el contexto.")
+            hint("Sesión interactiva abierta. El agente puede inspeccionar el host y ejecutar pasos operativos por ti.")
 
         pending_prompt = prompt.strip()
         while True:
@@ -2354,125 +2489,103 @@ class OmniCore:
                 continue
 
             session.setdefault("messages", []).append({"role": "user", "content": normalized_prompt})
-            runtime_messages = list(session["messages"])
-            if runtime_messages and runtime_messages[0].get("role") == "system":
-                runtime_messages = [runtime_messages[0], {"role": "system", "content": build_chat_memory_prompt(memory)}, *runtime_messages[1:]]
-            else:
-                runtime_messages.insert(0, {"role": "system", "content": build_chat_memory_prompt(memory)})
+            auto_steps = 0
+            while True:
+                memory["workspace_context"] = self.build_chat_workspace_context()
+                runtime_messages = self._build_chat_runtime_messages(session, memory)
 
-            try:
-                with Spinner("Consultando Omni Agent...", color=C.PRIMARY) as spinner:
-                    completion = chat_completion(
-                        protocol=str(config.get("protocol", "")),
-                        base_url=str(config.get("base_url", "")),
-                        model=str(config.get("model", "")),
-                        api_key=api_key,
-                        messages=runtime_messages,
+                try:
+                    with Spinner("Consultando Omni Agent...", color=C.PRIMARY) as spinner:
+                        completion = chat_completion(
+                            protocol=str(config.get("protocol", "")),
+                            base_url=str(config.get("base_url", "")),
+                            model=str(config.get("model", "")),
+                            api_key=api_key,
+                            messages=runtime_messages,
+                        )
+                        spinner.finish("Respuesta recibida", success=True)
+                except Exception as err:
+                    render_human_error(
+                        f"El proveedor del agente devolvió un error: {err}",
+                        suggestion="Revisa base URL, API key y modelo configurado en `omni agent`.",
                     )
-                    spinner.finish("Respuesta recibida", success=True)
-            except Exception as err:
-                render_human_error(
-                    f"El proveedor del agente devolvió un error: {err}",
-                    suggestion="Revisa base URL, API key y modelo configurado en `omni agent`.",
-                )
-                return
+                    return
 
-            raw_text = str(completion.get("text", "")).strip()
-            action = parse_action_block(raw_text)
-            clean_text = clean_assistant_output(raw_text)
-            if clean_text:
-                print(clean_text)
-                nl()
-            session["messages"].append({"role": "assistant", "content": raw_text})
-            memory = record_chat_turn(memory, user_prompt=normalized_prompt, assistant_text=clean_text or raw_text, action=action)
-            save_chat_session(session_path, session)
-            save_chat_memory(memory_path, memory)
-
-            if not action:
-                if interactive_loop:
-                    continue
-                return
-
-            if action.get("type") != "command":
-                render_action_summary(
-                    str(action.get("title", "Siguiente paso")),
-                    [str(item) for item in action.get("items", [])] or [clean_text or "Sin detalle adicional"],
-                    accent=C.PRIMARY,
-                )
-                if interactive_loop:
-                    continue
-                return
-
-            command = str(action.get("command", "")).strip()
-            if not command:
-                if interactive_loop:
-                    continue
-                return
-            render_action_summary(
-                str(action.get("title", "Comando sugerido")),
-                [command, "Solo se ejecutan comandos que empiecen por `omni `."],
-                accent=C.YLW,
-            )
-            confirm = bool(action.get("confirm", True))
-            should_run = accept_all or not confirm or self.confirm_step("¿Ejecuto este comando ahora?", default=False)
-            if not should_run:
-                warn("Comando sugerido, pero no ejecutado.")
-                if interactive_loop:
-                    continue
-                return
-
-            result = self.run_agent_omni_command(command)
-            memory = record_chat_turn(
-                memory,
-                user_prompt=f"execute:{command}",
-                assistant_text=str(result.get("stdout", "") or result.get("stderr", "") or ""),
-                action=action,
-                command_result=result,
-            )
-            save_chat_memory(memory_path, memory)
-            if not result.get("success"):
-                render_human_error(
-                    str(result.get("stderr") or result.get("error") or "La ejecución del comando falló."),
-                    suggestion="Verifica el comando sugerido o reintenta con un paso más específico.",
-                )
-                return
-
-            output_lines = (str(result.get("stdout", "")) or "Comando ejecutado sin salida visible.").strip().splitlines()
-            render_action_summary(
-                "Comando ejecutado",
-                [f"Command: {command}", *output_lines[:8]],
-                accent=C.GRN,
-            )
-            session["messages"].append(
-                {
-                    "role": "user",
-                    "content": "Resultado del comando:\n" + (str(result.get("stdout", "")) or str(result.get("stderr", "")) or "Sin salida"),
-                }
-            )
-            try:
-                follow_up_messages = list(session["messages"])
-                if follow_up_messages and follow_up_messages[0].get("role") == "system":
-                    follow_up_messages = [follow_up_messages[0], {"role": "system", "content": build_chat_memory_prompt(memory)}, *follow_up_messages[1:]]
-                else:
-                    follow_up_messages.insert(0, {"role": "system", "content": build_chat_memory_prompt(memory)})
-                follow_up = chat_completion(
-                    protocol=str(config.get("protocol", "")),
-                    base_url=str(config.get("base_url", "")),
-                    model=str(config.get("model", "")),
-                    api_key=api_key,
-                    messages=follow_up_messages
-                    + [{"role": "user", "content": "Explica el resultado anterior en pocas líneas y sugiere el siguiente paso operativo."}],
-                )
-                follow_up_text = clean_assistant_output(str(follow_up.get("text", "")).strip())
-                if follow_up_text:
+                raw_text = str(completion.get("text", "")).strip()
+                action = parse_action_block(raw_text)
+                clean_text = clean_assistant_output(raw_text)
+                if clean_text:
+                    print(clean_text)
                     nl()
-                    render_action_summary("Siguiente paso", follow_up_text.splitlines()[:8], accent=C.PRIMARY)
-                    session["messages"].append({"role": "assistant", "content": str(follow_up.get("text", "")).strip()})
-                    memory = record_chat_turn(memory, user_prompt="follow-up", assistant_text=follow_up_text)
-                    save_chat_memory(memory_path, memory)
-            except Exception:
-                pass
-            save_chat_session(session_path, session)
+                session["messages"].append({"role": "assistant", "content": raw_text})
+                memory = record_chat_turn(memory, user_prompt=normalized_prompt if auto_steps == 0 else "auto-step", assistant_text=clean_text or raw_text, action=action)
+                save_chat_session(session_path, session)
+                save_chat_memory(memory_path, memory)
+
+                if not action:
+                    break
+
+                if action.get("type") != "command":
+                    render_action_summary(
+                        str(action.get("title", "Siguiente paso")),
+                        [str(item) for item in action.get("items", [])] or [clean_text or "Sin detalle adicional"],
+                        accent=C.PRIMARY,
+                    )
+                    break
+
+                command = str(action.get("command", "")).strip()
+                if not command:
+                    break
+                render_action_summary(
+                    str(action.get("title", "Comando sugerido")),
+                    [
+                        command,
+                        "Omni Agent puede ejecutar `omni ...` y comandos seguros de lectura sobre el host.",
+                    ],
+                    accent=C.YLW,
+                )
+                confirm = bool(action.get("confirm", True))
+                should_run = accept_all or not confirm or self.confirm_step("¿Ejecuto este comando ahora?", default=False)
+                if not should_run:
+                    warn("Comando sugerido, pero no ejecutado.")
+                    break
+
+                result = self.run_agent_omni_command(command)
+                memory = record_chat_turn(
+                    memory,
+                    user_prompt=f"execute:{command}",
+                    assistant_text=str(result.get("stdout", "") or result.get("stderr", "") or ""),
+                    action=action,
+                    command_result=result,
+                )
+                save_chat_memory(memory_path, memory)
+                if not result.get("success"):
+                    render_human_error(
+                        str(result.get("stderr") or result.get("error") or "La ejecución del comando falló."),
+                        suggestion="Verifica el comando sugerido o reintenta con un paso más específico.",
+                    )
+                    if not interactive_loop:
+                        return
+                    break
+
+                output_lines = (str(result.get("stdout", "")) or "Comando ejecutado sin salida visible.").strip().splitlines()
+                render_action_summary(
+                    "Comando ejecutado",
+                    [f"Command: {command}", *output_lines[:8]],
+                    accent=C.GRN,
+                )
+                session["messages"].append(
+                    {
+                        "role": "user",
+                        "content": "Resultado del comando:\n" + (str(result.get("stdout", "")) or str(result.get("stderr", "")) or "Sin salida"),
+                    }
+                )
+                save_chat_session(session_path, session)
+                auto_steps += 1
+                if auto_steps >= 4:
+                    hint("Límite de pasos automáticos alcanzado. Escribe `continúa` si quieres que siga operando.")
+                    break
+
             if not interactive_loop:
                 return
 

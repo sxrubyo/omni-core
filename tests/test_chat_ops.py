@@ -15,6 +15,7 @@ from chat_ops import (  # noqa: E402
     clean_assistant_output,
     build_chat_request,
     default_chat_memory,
+    ensure_activation_prompt,
     ensure_chat_permissions,
     extract_chat_text,
     load_chat_memory,
@@ -153,6 +154,46 @@ class ChatOpsTests(unittest.TestCase):
             self.assertIn("linux-box", prompt)
             self.assertIn("OpenAI Direct", prompt)
             self.assertIn("omni doctor", prompt)
+
+    def test_chat_memory_prompt_includes_workspace_context(self):
+        memory = default_chat_memory(
+            host_snapshot={"host": "linux-box", "shell": "bash", "package_manager": "apt-get"},
+            provider_title="OpenAI Direct",
+            model="gpt-5.2",
+            language="es",
+        )
+        memory["workspace_context"] = {
+            "cwd": "/srv/app",
+            "omni_home": "/home/ubuntu/.omni",
+            "cwd_entries": ["docker-compose.yml", "src/", ".codex/"],
+            "home_entries": [".ssh/", ".omni/", "projects/"],
+            "inventory_summary": ["APT: 733", "Python: 183"],
+        }
+        prompt = build_chat_memory_prompt(memory)
+        self.assertIn("Directorio actual: /srv/app", prompt)
+        self.assertIn("docker-compose.yml", prompt)
+        self.assertIn("APT: 733", prompt)
+
+    def test_ensure_activation_prompt_rewrites_legacy_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt_path = Path(tmp) / "activation.txt"
+            prompt_path.write_text(
+                """Eres Omni Agent, el operador conversacional de OmniSync.
+Tu proveedor principal es el que el usuario eligió en `omni agent`; no lo sustituyas ni lo ocultes.
+Habla en español por defecto, con tono directo, útil y técnico cuando haga falta.
+Ayudas con migración, reconstrucción de hosts, bundles, secretos, rewrite de IP/hostname, Docker, PM2, Linux y operación del workspace.
+Si conviene ejecutar algo, puedes proponer una acción estructurada al final usando exactamente una línea `ACTION:{...}`.
+Acciones soportadas:
+- comando shell: ACTION:{"type":"command","command":"omni doctor","confirm":true,"title":"Diagnóstico"}
+- lista de tareas: ACTION:{"type":"todo","title":"Siguiente paso","items":["...","..."]}
+No metas Markdown alrededor de ACTION. El texto visible para el usuario debe quedar limpio y separado.
+Si no sabes algo, dilo sin inventar.
+""",
+                encoding="utf-8",
+            )
+            prompt = ensure_activation_prompt(prompt_path)
+            self.assertIn("Tu trabajo no es solo responder", prompt)
+            self.assertIn("comandos seguros de inspección", prompt)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,32 @@ from permissions_ops import ensure_permissions_state
 
 DEFAULT_ACTIVATION_PROMPT = """Eres Omni Agent, el operador conversacional de OmniSync.
 Tu proveedor principal es el que el usuario eligió en `omni agent`; no lo sustituyas ni lo ocultes.
+Habla en español por defecto, con tono directo, operativo y técnico cuando haga falta.
+Tu trabajo no es solo responder: debes mover la migración adelante dentro de la terminal del usuario.
+
+Reglas operativas:
+1. Cuando el usuario quiera migrar, respaldar, inspeccionar o reconstruir un host, inspecciona primero el estado real del entorno antes de pedir demasiados datos.
+2. Usa el contexto del host, los archivos visibles y la memoria operativa para evitar preguntas repetidas.
+3. Haz como máximo una pregunta bloqueante por turno cuando falte un dato crítico de destino, autenticación o alcance.
+4. Si puedes actuar, devuelve una acción estructurada al final usando exactamente una línea `ACTION:{...}`.
+5. Después de cada resultado de comando, sigue operando hasta terminar el paso actual, quedar bloqueado o necesitar confirmación humana.
+6. Usa `confirm:false` en inspecciones seguras y `confirm:true` para cambios, transferencias o acciones potencialmente destructivas.
+
+Acciones soportadas:
+- comando terminal: ACTION:{"type":"command","command":"pwd","confirm":false,"title":"Contexto actual"}
+- comando omni: ACTION:{"type":"command","command":"omni doctor","confirm":false,"title":"Diagnóstico Omni"}
+- lista de tareas: ACTION:{"type":"todo","title":"Siguiente paso","items":["...","..."]}
+
+Capacidades de terminal:
+- `omni ...` para operar OmniSync
+- comandos seguros de inspección como `pwd`, `ls`, `find`, `cat`, `head`, `tail`, `rg`, `git status`, `git branch`, `git remote -v`, `uname -a`, `whoami`, `hostname`, `df -h`, `du -sh`
+
+No metas Markdown alrededor de ACTION. El texto visible para el usuario debe quedar limpio y separado.
+Si no sabes algo, dilo sin inventar.
+"""
+LEGACY_ACTIVATION_PROMPTS = {
+    """Eres Omni Agent, el operador conversacional de OmniSync.
+Tu proveedor principal es el que el usuario eligió en `omni agent`; no lo sustituyas ni lo ocultes.
 Habla en español por defecto, con tono directo, útil y técnico cuando haga falta.
 Ayudas con migración, reconstrucción de hosts, bundles, secretos, rewrite de IP/hostname, Docker, PM2, Linux y operación del workspace.
 Si conviene ejecutar algo, puedes proponer una acción estructurada al final usando exactamente una línea `ACTION:{...}`.
@@ -24,7 +50,8 @@ Acciones soportadas:
 - lista de tareas: ACTION:{"type":"todo","title":"Siguiente paso","items":["...","..."]}
 No metas Markdown alrededor de ACTION. El texto visible para el usuario debe quedar limpio y separado.
 Si no sabes algo, dilo sin inventar.
-"""
+""".strip()
+}
 
 ACTION_RE = re.compile(r"(?:\r?\n)?ACTION:(\{.*\})\s*$", re.DOTALL)
 
@@ -37,7 +64,11 @@ def ensure_activation_prompt(prompt_path: Path) -> str:
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     if not prompt_path.exists():
         prompt_path.write_text(DEFAULT_ACTIVATION_PROMPT.rstrip() + "\n", encoding="utf-8")
-    return prompt_path.read_text(encoding="utf-8").strip()
+    current = prompt_path.read_text(encoding="utf-8").strip()
+    if current in LEGACY_ACTIVATION_PROMPTS:
+        prompt_path.write_text(DEFAULT_ACTIVATION_PROMPT.rstrip() + "\n", encoding="utf-8")
+        current = DEFAULT_ACTIVATION_PROMPT.strip()
+    return current
 
 
 def load_env_value(env_file: Path, key: str) -> str:
@@ -131,6 +162,7 @@ def default_chat_memory(
             "ram": snapshot.get("ram") or "",
             "disk": snapshot.get("disk") or "",
         },
+        "workspace_context": {},
         "recent_prompts": [],
         "recent_actions": [],
         "updated_at": utc_now(),
@@ -188,6 +220,7 @@ def record_chat_turn(
 
 def build_chat_memory_prompt(memory: Dict[str, Any]) -> str:
     host = memory.get("host_snapshot") or {}
+    workspace = memory.get("workspace_context") or {}
     prompt_lines = [
         "Memoria operativa de Omni Agent.",
         f"Idioma preferido: {memory.get('language', 'es')}",
@@ -211,6 +244,22 @@ def build_chat_memory_prompt(memory: Dict[str, Any]) -> str:
                 if value
             )
         )
+    if workspace:
+        cwd = str(workspace.get("cwd", "")).strip()
+        omni_home = str(workspace.get("omni_home", "")).strip()
+        visible_cwd = ", ".join(str(item).strip() for item in workspace.get("cwd_entries", []) if str(item).strip())
+        visible_home = ", ".join(str(item).strip() for item in workspace.get("home_entries", []) if str(item).strip())
+        inventory_summary = ", ".join(str(item).strip() for item in workspace.get("inventory_summary", []) if str(item).strip())
+        if cwd:
+            prompt_lines.append(f"Directorio actual: {cwd}")
+        if omni_home:
+            prompt_lines.append(f"Home de OmniSync: {omni_home}")
+        if visible_cwd:
+            prompt_lines.append(f"Entradas visibles en cwd: {visible_cwd}")
+        if visible_home:
+            prompt_lines.append(f"Entradas visibles en home: {visible_home}")
+        if inventory_summary:
+            prompt_lines.append(f"Inventario instalado conocido: {inventory_summary}")
     recent_prompts = list(memory.get("recent_prompts") or [])[-3:]
     if recent_prompts:
         prompt_lines.append("Últimos turnos:")
