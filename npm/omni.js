@@ -6,11 +6,17 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const packageRoot = path.resolve(__dirname, "..");
+const packageJsonPath = path.join(packageRoot, "package.json");
+const packageMetadata = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+const packageVersion = String(packageMetadata.version || "").trim();
+const effectivePlatform = process.env.OMNI_FORCE_PLATFORM || process.platform;
 const omniHome = process.env.OMNI_INSTALL_HOME || path.join(os.homedir(), ".omni");
 const entrypoint = path.join(omniHome, "src", "omni_core.py");
+const runtimeDir = path.join(omniHome, "runtime");
 const sanitizedBaseEnv = (() => {
   const base = { ...process.env };
   for (const key of [
+    "OMNI_HOME",
     "OMNI_CONFIG_DIR",
     "OMNI_STATE_DIR",
     "OMNI_BACKUP_DIR",
@@ -30,11 +36,31 @@ const sanitizedBaseEnv = (() => {
   return base;
 })();
 
+const SKIP_NAMES = new Set([
+  ".git",
+  ".pytest_cache",
+  ".tmp",
+  "__pycache__",
+  "backups",
+  "data",
+  "docs",
+  "exports",
+  "home_snapshot",
+  "home_private_snapshot",
+  "logs",
+  "node_modules",
+  "tests",
+]);
+
+function ensureDir(target) {
+  fs.mkdirSync(target, { recursive: true });
+}
+
 function runtimeCandidates() {
   return [
-    path.join(omniHome, "runtime", "bin", "python"),
-    path.join(omniHome, "runtime", "bin", "python3"),
-    path.join(omniHome, "runtime", "Scripts", "python.exe"),
+    path.join(runtimeDir, "bin", "python"),
+    path.join(runtimeDir, "bin", "python3"),
+    path.join(runtimeDir, "Scripts", "python.exe"),
   ];
 }
 
@@ -54,6 +80,11 @@ function runAndReturn(command, args, extraEnv) {
   });
 }
 
+function fail(message) {
+  console.error(`ERR ${message}`);
+  process.exit(1);
+}
+
 function run(command, args, extraEnv) {
   const result = runAndReturn(command, args, extraEnv);
   if (typeof result.status === "number") {
@@ -62,27 +93,126 @@ function run(command, args, extraEnv) {
   process.exit(1);
 }
 
-function bootstrapWithInstallScript() {
-  if (process.platform === "win32") {
-    console.error("ERR OmniSync npm bootstrap on Windows is not enabled yet.");
-    console.error("Use WSL or the direct install script instead.");
-    process.exit(1);
+function readInstalledVersion() {
+  const installedPackage = path.join(omniHome, "package.json");
+  if (!fs.existsSync(installedPackage)) {
+    return "";
   }
-
-  const installScript = path.join(packageRoot, "install.sh");
-  if (!fs.existsSync(installScript)) {
-    console.error(`ERR install.sh not found in package root: ${installScript}`);
-    process.exit(1);
+  try {
+    const payload = JSON.parse(fs.readFileSync(installedPackage, "utf8"));
+    return String(payload.version || "").trim();
+  } catch (_err) {
+    return "";
   }
+}
 
-  const result = runAndReturn("bash", [installScript], {
-    OMNI_INSTALL_LOCAL_REPO: packageRoot,
-    OMNI_INSTALL_HOME: omniHome,
-    OMNI_PREEXISTING_OMNI: "",
-  });
+function syncPackageTree(sourceDir, targetDir) {
+  ensureDir(targetDir);
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    if (SKIP_NAMES.has(entry.name)) {
+      continue;
+    }
+    if (sourceDir === packageRoot && entry.name === ".claude") {
+      const handoffDir = path.join(sourceDir, ".claude", "handoffs");
+      if (fs.existsSync(handoffDir)) {
+        // handled by skipping while recursing below
+      }
+    }
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      if (path.relative(packageRoot, sourcePath) === ".claude/handoffs") {
+        continue;
+      }
+      syncPackageTree(sourcePath, targetPath);
+      continue;
+    }
+    ensureDir(path.dirname(targetPath));
+    fs.copyFileSync(sourcePath, targetPath);
+  }
+}
+
+function findSystemPython() {
+  const candidates =
+    effectivePlatform === "win32"
+      ? [
+          ["py", ["-3"]],
+          ["python", []],
+          ["python3", []],
+        ]
+      : [
+          ["python3", []],
+          ["python", []],
+        ];
+  for (const [command, prefixArgs] of candidates) {
+    const probe = spawnSync(command, [...prefixArgs, "-c", "import sys; print(sys.executable)"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+      env: sanitizedBaseEnv,
+    });
+    if (probe.status === 0) {
+      return { command, prefixArgs };
+    }
+  }
+  return null;
+}
+
+function ensureRuntime() {
+  let runtime = resolveRuntime();
+  if (runtime) {
+    return runtime;
+  }
+  ensureDir(omniHome);
+  const python = findSystemPython();
+  if (!python) {
+    fail(
+      effectivePlatform === "win32"
+        ? "No encontré Python 3. Instala Python 3.10+ y vuelve a ejecutar `omni`."
+        : "No encontré python3/python. Instala Python 3.10+ y vuelve a ejecutar `omni`."
+    );
+  }
+  let result = runAndReturn(python.command, [...python.prefixArgs, "-m", "venv", runtimeDir], {});
   if (typeof result.status === "number" && result.status !== 0) {
     process.exit(result.status);
   }
+  runtime = resolveRuntime();
+  if (!runtime) {
+    fail(`No pude crear el runtime aislado en ${runtimeDir}`);
+  }
+  if (process.env.OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP === "1") {
+    return runtime;
+  }
+  result = runAndReturn(runtime, ["-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip"], {});
+  if (typeof result.status === "number" && result.status !== 0) {
+    process.exit(result.status);
+  }
+  result = runAndReturn(runtime, ["-m", "pip", "install", "--disable-pip-version-check", "rich", "tqdm", "prompt_toolkit", "paramiko"], {});
+  if (typeof result.status === "number" && result.status !== 0) {
+    process.exit(result.status);
+  }
+  return runtime;
+}
+
+function bootstrapFromPackage() {
+  syncPackageTree(packageRoot, omniHome);
+  const runtime = ensureRuntime();
+  const init = runAndReturn(runtime, [entrypoint, "init"], { OMNI_HOME: omniHome });
+  if (typeof init.status === "number" && init.status !== 0) {
+    process.exit(init.status);
+  }
+}
+
+function needsBootstrap() {
+  if (!fs.existsSync(entrypoint)) {
+    return true;
+  }
+  if (!resolveRuntime()) {
+    return true;
+  }
+  if (readInstalledVersion() !== packageVersion) {
+    return true;
+  }
+  return process.env.OMNI_FORCE_SYNC === "1";
 }
 
 function execInstalledOmni(argv) {
@@ -94,7 +224,10 @@ function execInstalledOmni(argv) {
   return true;
 }
 
+if (needsBootstrap()) {
+  bootstrapFromPackage();
+}
+
 if (!execInstalledOmni(process.argv.slice(2))) {
-  bootstrapWithInstallScript();
-  execInstalledOmni(process.argv.slice(2));
+  fail(`No pude iniciar OmniSync desde ${omniHome}`);
 }

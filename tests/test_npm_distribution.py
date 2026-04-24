@@ -19,6 +19,7 @@ class NpmDistributionTests(unittest.TestCase):
         self.assertEqual(payload.get("name"), "omnisync")
         self.assertEqual(payload.get("bin", {}).get("omni"), "npm/omni.js")
         self.assertEqual(payload.get("publishConfig", {}).get("access"), "public")
+        self.assertIn("install.ps1", payload.get("files", []))
 
     @unittest.skipUnless(shutil.which("npm"), "npm is required")
     def test_npm_pack_dry_run_succeeds(self) -> None:
@@ -38,6 +39,7 @@ class NpmDistributionTests(unittest.TestCase):
         self.assertIn("package.json", files)
         self.assertIn("npm/omni.js", files)
         self.assertIn("install.sh", files)
+        self.assertIn("install.ps1", files)
         self.assertNotIn("config/repos.json", files)
         self.assertFalse(any(path.startswith(".claude/handoffs/") for path in files))
         self.assertFalse(any("__pycache__" in path for path in files))
@@ -54,6 +56,7 @@ class NpmDistributionTests(unittest.TestCase):
             **dict(os.environ),
             "HOME": str(home_root),
             "OMNI_INSTALL_HOME": str(home_root / ".omni"),
+            "OMNI_HOME": str(REPO_ROOT / "broken-local-repo"),
             "OMNI_INSTALL_SKIP_DEPENDENCY_BOOTSTRAP": "1",
         }
         result = subprocess.run(
@@ -65,5 +68,13 @@ class NpmDistributionTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        self.assertNotIn("Repaired preexisting omni runtime", result.stdout)
+        self.assertTrue((home_root / ".omni" / "src" / "omni_core.py").exists())
+        self.assertNotIn(str(REPO_ROOT / "broken-local-repo"), result.stdout + result.stderr)
         self.assertIn("OmniSync - Command Reference", result.stdout)
+
+    def test_npm_launcher_script_supports_windows_bootstrap(self) -> None:
+        script = (REPO_ROOT / "npm" / "omni.js").read_text(encoding="utf-8")
+        self.assertNotIn("Windows is not enabled yet", script)
+        self.assertIn('"OMNI_HOME"', script)
+        self.assertIn("findSystemPython", script)
+        self.assertIn("install.ps1", (REPO_ROOT / "package.json").read_text(encoding="utf-8"))
