@@ -312,7 +312,7 @@ def verbose(msg):
 # BRANDING
 # ══════════════════════════════════════════════════════════════════════════════
 
-OMNI_VERSION = "2.1.3"
+OMNI_VERSION = "2.1.4"
 OMNI_BUILD = "2026.03.portable"
 OMNI_CODENAME = "Titan"
 
@@ -2765,9 +2765,11 @@ class OmniCore:
         print()
 
     def init_workspace(self, profile: str = ""):
-        print_logo(compact=True)
-        render_help_overview()
-        section("Workspace Init")
+        bootstrap_mode = os.environ.get("OMNI_BOOTSTRAP_INIT", "").strip().lower() in {"1", "true", "yes", "on"}
+        if not bootstrap_mode:
+            print_logo(compact=True)
+            render_help_overview()
+            section("Workspace Init")
 
         requested_profile = str(profile or "").strip().lower().replace("_", "-")
         manifest_path = CONFIG_DIR / "system_manifest.json"
@@ -2821,7 +2823,8 @@ class OmniCore:
             else:
                 created.append(manifest_path)
             workspace_changed = True
-            ok(f"Activated profile {manifest['profile']} in {manifest_path}")
+            if not bootstrap_mode:
+                ok(f"Activated profile {manifest['profile']} in {manifest_path}")
 
         servers_path = CONFIG_DIR / "servers.json"
         if servers_path.exists():
@@ -2840,37 +2843,41 @@ class OmniCore:
                         servers_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
                         self.servers = self.load_servers()
                         workspace_changed = True
-                        ok(f"Updated placeholder host in {servers_path} -> {replacement_host}")
+                        if not bootstrap_mode:
+                            ok(f"Updated placeholder host in {servers_path} -> {replacement_host}")
             except Exception as err:
-                warn(f"Failed to normalize servers.json automatically: {err}")
+                if not bootstrap_mode:
+                    warn(f"Failed to normalize servers.json automatically: {err}")
 
-        for path in created:
-            ok(f"Created {path}")
-        for path in existing:
-            dim(f"Already present: {path}")
-        for path in missing_templates:
-            warn(f"Template not found: {path}")
+        if not bootstrap_mode:
+            for path in created:
+                ok(f"Created {path}")
+            for path in existing:
+                dim(f"Already present: {path}")
+            for path in missing_templates:
+                warn(f"Template not found: {path}")
 
-        if workspace_changed and AUTO_BACKUP_ON_CHANGE:
+        if workspace_changed and AUTO_BACKUP_ON_CHANGE and not bootstrap_mode:
             info("Creando backup automático post-init...")
             self.run_backup(profile=requested_profile or profile)
 
         sync_report = sync_agent_integrations(AGENT_SKILL_DIR, home_root=Path.home(), repo_root=OMNI_HOME)
         linked_targets = sum(len(item.written) for item in sync_report["integrations"])
-        if linked_targets:
+        if linked_targets and not bootstrap_mode:
             ok(f"Agent integrations refreshed across {linked_targets} target files.")
 
-        nl()
-        bullet("Next steps", C.PRIMARY, bold=True)
-        dim("1. Edit .env and config/*.json if needed")
-        if requested_profile:
-            dim(f"2. Manifest profile active: {requested_profile}")
-            dim("3. Run ./install.sh --compose --sync --timer")
-            dim("4. Validate with omni status and omni inventory")
-        else:
-            dim("2. Run ./install.sh --compose --sync --timer")
-            dim("3. Validate with omni status and omni inventory")
-        nl()
+        if not bootstrap_mode:
+            nl()
+            bullet("Next steps", C.PRIMARY, bold=True)
+            dim("1. Edit .env and config/*.json if needed")
+            if requested_profile:
+                dim(f"2. Manifest profile active: {requested_profile}")
+                dim("3. Run ./install.sh --compose --sync --timer")
+                dim("4. Validate with omni status and omni inventory")
+            else:
+                dim("2. Run ./install.sh --compose --sync --timer")
+                dim("3. Validate with omni status and omni inventory")
+            nl()
 
     def start_guided(self, *, accept_all: bool = False) -> None:
         info_obj = detect_platform_info()

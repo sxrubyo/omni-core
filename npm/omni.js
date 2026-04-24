@@ -196,7 +196,11 @@ function ensureRuntime() {
 function bootstrapFromPackage() {
   syncPackageTree(packageRoot, omniHome);
   const runtime = ensureRuntime();
-  const init = runAndReturn(runtime, [entrypoint, "init"], { OMNI_HOME: omniHome });
+  const init = runAndReturn(runtime, [entrypoint, "init"], {
+    OMNI_HOME: omniHome,
+    OMNI_BOOTSTRAP_INIT: "1",
+    OMNI_AUTO_BACKUP_ON_CHANGE: "0",
+  });
   if (typeof init.status === "number" && init.status !== 0) {
     process.exit(init.status);
   }

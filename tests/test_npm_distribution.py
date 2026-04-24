@@ -72,6 +72,8 @@ class NpmDistributionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         self.assertTrue((home_root / ".omni" / "src" / "omni_core.py").exists())
         self.assertNotIn(str(REPO_ROOT / "broken-local-repo"), result.stdout + result.stderr)
+        self.assertNotIn("Workspace Init", result.stdout + result.stderr)
+        self.assertNotIn("Creando backup automático post-init", result.stdout + result.stderr)
         self.assertIn("OmniSync - Command Reference", result.stdout)
 
     def test_npm_launcher_script_supports_windows_bootstrap(self) -> None:
