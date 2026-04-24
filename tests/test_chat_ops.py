@@ -12,9 +12,11 @@ if str(SRC) not in sys.path:
 
 from chat_ops import (  # noqa: E402
     build_chat_memory_prompt,
+    build_operator_goal_prompt,
     clean_assistant_output,
     build_chat_request,
     default_chat_memory,
+    detect_language_preference,
     ensure_activation_prompt,
     ensure_chat_permissions,
     extract_chat_text,
@@ -168,11 +170,13 @@ class ChatOpsTests(unittest.TestCase):
             "cwd_entries": ["docker-compose.yml", "src/", ".codex/"],
             "home_entries": [".ssh/", ".omni/", "projects/"],
             "inventory_summary": ["APT: 733", "Python: 183"],
+            "agent_runtimes": ["Codex CLI: ready", "Claude Code: missing"],
         }
         prompt = build_chat_memory_prompt(memory)
         self.assertIn("Directorio actual: /srv/app", prompt)
         self.assertIn("docker-compose.yml", prompt)
         self.assertIn("APT: 733", prompt)
+        self.assertIn("Codex CLI: ready", prompt)
 
     def test_ensure_activation_prompt_rewrites_legacy_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,6 +198,17 @@ Si no sabes algo, dilo sin inventar.
             prompt = ensure_activation_prompt(prompt_path)
             self.assertIn("Tu trabajo no es solo responder", prompt)
             self.assertIn("comandos seguros de inspección", prompt)
+
+    def test_detect_language_preference_switches_to_english_when_prompt_is_english(self):
+        self.assertEqual(detect_language_preference("Please help me migrate this Ubuntu host", fallback="es"), "en")
+        self.assertEqual(detect_language_preference("quiero migrar todo mi servidor", fallback="en"), "es")
+
+    def test_build_operator_goal_prompt_requests_host_summary_on_first_turn(self):
+        prompt = build_operator_goal_prompt("quiero migrar todo", language="es", first_turn=True)
+        self.assertIn("resume lo que ya ves en este host", prompt)
+        self.assertIn("Solicitud del usuario", prompt)
+        english = build_operator_goal_prompt("help me move this server", language="en", first_turn=True)
+        self.assertIn("summarize what you already see", english)
 
 
 if __name__ == "__main__":

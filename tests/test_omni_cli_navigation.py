@@ -7,6 +7,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from omni_core import apply_digit_jump, ALIASES  # noqa: E402
+from omni_core import ALIASES, apply_digit_jump, main  # noqa: E402
 
 
 class OmniCliNavigationTests(unittest.TestCase):
@@ -37,6 +38,14 @@ class OmniCliNavigationTests(unittest.TestCase):
 
     def test_commands_alias_routes_to_help(self) -> None:
         self.assertEqual(ALIASES["commands"], "help")
+
+    def test_local_agent_launcher_fast_path_preserves_dashdash_help(self) -> None:
+        with mock.patch("sys.argv", ["omni", "gemini", "--help"]), \
+             mock.patch("omni_core.OmniCore.launch_agent_runtime", return_value=0) as launch_mock:
+            with self.assertRaises(SystemExit) as exc:
+                main()
+        self.assertEqual(exc.exception.code, 0)
+        launch_mock.assert_called_once_with("gemini-cli", ["--help"])
 
     def test_select_menu_redraws_in_place_when_navigation_changes(self) -> None:
         script = textwrap.dedent(

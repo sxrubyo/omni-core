@@ -31,7 +31,7 @@ from bundle_ops import (
 )
 from briefcase_ops import build_briefcase_manifest, build_restore_plan, build_restore_script
 from agent_ops import env_has_value, get_provider, load_agent_config, provider_catalog, save_agent_config, upsert_env_value
-from agent_skill_ops import sync_agent_integrations
+from agent_skill_ops import RUNTIMES, detect_agent_runtimes, sync_agent_integrations
 from bridge_ops import (
     build_host_rewrite_context,
     load_capture_summary,
@@ -40,8 +40,10 @@ from bridge_ops import (
 )
 from chat_ops import (
     build_chat_memory_prompt,
+    build_operator_goal_prompt,
     chat_completion,
     clean_assistant_output,
+    detect_language_preference,
     ensure_activation_prompt,
     default_chat_memory,
     load_chat_memory,
@@ -101,6 +103,7 @@ from platform_ops import detect_platform_info
 from reconcile_ops import install_systemd_service, install_systemd_timer, reconcile_host
 from watch_ops import capture_watch_snapshot, load_watch_snapshot, save_watch_snapshot, summarize_snapshot_diff
 from runtime_inventory_ops import load_installed_inventory, summarize_installed_inventory
+from search_ops import brave_search, summarize_brave_results
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -317,7 +320,7 @@ def verbose(msg):
 # BRANDING
 # ══════════════════════════════════════════════════════════════════════════════
 
-OMNI_VERSION = "2.1.7"
+OMNI_VERSION = "2.1.8"
 OMNI_BUILD = "2026.03.portable"
 OMNI_CODENAME = "Titan"
 
@@ -346,6 +349,12 @@ ALIASES = {
     "commands": "help",
     "resume": "continue",
     "cont": "continue",
+}
+LOCAL_AGENT_LAUNCH_ACTIONS = {
+    "codex": "codex-cli",
+    "claude": "claude-code",
+    "gemini": "gemini-cli",
+    "opencode": "opencode-cli",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2019,6 +2028,9 @@ class OmniCore:
         kv("GitHub", self.t("autenticado", "authenticated") if github_cfg.get("token") else self.t("no configurado", "not configured"), color=C.GRN if github_cfg.get("token") else C.YLW)
         if github_cfg.get("repo"):
             kv(self.t("Repo de GitHub", "GitHub Repo"), f"{github_cfg.get('owner', '')}/{github_cfg.get('repo', '')}".strip("/"), color=C.GRN)
+        search_cfg = global_config.get("search") or {}
+        search_ready = bool(load_env_value(ENV_FILE, str(search_cfg.get("env_var") or "BRAVE_SEARCH_API_KEY")))
+        kv("Search", f"{self.configured_search_provider()} · {'ready' if search_ready else 'missing-key'}", color=C.GRN if search_ready else C.YLW)
         agent_config = load_agent_config(AGENT_CONFIG_FILE)
         if agent_config:
             kv(self.t("Proveedor de agente", "Agent Provider"), str(agent_config.get("provider", "unknown")), color=C.GRN)
@@ -2051,6 +2063,35 @@ class OmniCore:
                     warn(self.t(f"Dry run activo: no se guardó el idioma {language}.", f"Dry run active: language {language} was not saved."))
                 else:
                     ok(self.t(f"Idioma activo: {language} ({SUPPORTED_LANGUAGES[language]})", f"Active language: {language} ({SUPPORTED_LANGUAGES[language]})"))
+            self.show_config()
+            return
+        if normalized in {"brave-search", "brave", "search"}:
+            config = self.load_global_config()
+            search_cfg = config.get("search") or {}
+            env_var = str(search_cfg.get("env_var") or "BRAVE_SEARCH_API_KEY")
+            existing = load_env_value(ENV_FILE, env_var)
+            if value.strip():
+                raw_key = value.strip()
+            elif self.is_interactive():
+                raw_key = getpass.getpass("Brave Search API key (Enter para omitir): ").strip()
+            else:
+                raw_key = ""
+            config["search"] = {
+                "provider": "brave",
+                "env_var": env_var,
+                "configured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            if raw_key and not self.is_dry_run():
+                upsert_env_value(ENV_FILE, env_var, raw_key)
+                os.environ[env_var] = raw_key
+            if not self.is_dry_run():
+                self.save_global_config(config)
+            if raw_key:
+                ok("Brave Search quedó configurado para Omni Agent.")
+            elif existing:
+                ok("Brave Search ya estaba configurado.")
+            else:
+                hint("Guardé el provider de búsqueda, pero todavía falta la API key.")
             self.show_config()
             return
         self.show_config()
@@ -2234,7 +2275,8 @@ class OmniCore:
             ],
             accent=C.PRIMARY,
         )
-        hint("Usa `omni chat` para hablar con el agente y permitirle ejecutar comandos `omni` en tu nombre.")
+        hint("Usa `omni chat` para hablar con el agente, dejar que inspeccione el host y opere paso a paso contigo.")
+        hint("Si quieres búsqueda web bajo demanda, configura Brave Search con `omni config brave-search`.")
 
     def build_chat_workspace_context(self) -> Dict[str, Any]:
         def list_entries(path: Path, *, limit: int = 8) -> List[str]:
@@ -2252,6 +2294,7 @@ class OmniCore:
                 return []
 
         runtime_inventory = load_installed_inventory(STATE_DIR)
+        runtime_statuses = detect_agent_runtimes(AGENT_SKILL_DIR)
         cwd = Path.cwd()
         return {
             "cwd": str(cwd),
@@ -2260,6 +2303,10 @@ class OmniCore:
             "cwd_entries": list_entries(cwd),
             "home_entries": list_entries(Path.home()),
             "inventory_summary": summarize_installed_inventory(runtime_inventory)[:4] if runtime_inventory else [],
+            "agent_runtimes": [
+                f"{runtime.title}: {'ready' if runtime.installed else 'missing'}"
+                for runtime in runtime_statuses
+            ],
         }
 
     def _build_chat_runtime_messages(self, session: Dict[str, Any], memory: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -2394,7 +2441,7 @@ class OmniCore:
             "Operator Session",
             [
                 "Omni Agent puede inspeccionar el host, leer archivos visibles y ejecutar `omni ...` o comandos seguros.",
-                "Atajos: /memory para contexto, /clear para reiniciar sesión, /exit para salir.",
+                "Atajos: /memory para contexto, /clear para reiniciar sesión, /logout para cerrar sesión, /exit para salir.",
                 "Si falta un dato crítico, preguntará solo lo necesario antes de seguir operando.",
             ],
             accent=C.PRIMARY,
@@ -2447,7 +2494,7 @@ class OmniCore:
 
         interactive_loop = not prompt.strip() and self.is_interactive()
         if interactive_loop:
-            hint("Sesión interactiva abierta. El agente puede inspeccionar el host y ejecutar pasos operativos por ti.")
+            hint("Sesión interactiva abierta. El agente inspecciona el host, propone el siguiente paso y siempre confirma antes de actuar.")
 
         pending_prompt = prompt.strip()
         while True:
@@ -2475,6 +2522,13 @@ class OmniCore:
                     accent=C.PRIMARY,
                 )
                 continue
+            if interactive_loop and normalized_prompt.lower() in {"/logout", "logout"}:
+                if session_path.exists():
+                    session_path.unlink(missing_ok=True)
+                if memory_path.exists():
+                    memory_path.unlink(missing_ok=True)
+                ok("Sesión cerrada. Eliminé la memoria y el historial local de Omni Chat.")
+                return
             if interactive_loop and normalized_prompt.lower() in {"/clear", "clear"}:
                 session["messages"] = [{"role": "system", "content": activation_text}]
                 memory = default_chat_memory(
@@ -2491,8 +2545,21 @@ class OmniCore:
             session.setdefault("messages", []).append({"role": "user", "content": normalized_prompt})
             auto_steps = 0
             while True:
+                language = detect_language_preference(normalized_prompt, fallback=str(memory.get("language") or self.current_language()))
+                memory["language"] = language
                 memory["workspace_context"] = self.build_chat_workspace_context()
+                first_turn = not any(msg.get("role") == "assistant" for msg in session.get("messages", []))
+                goal_prompt = build_operator_goal_prompt(
+                    normalized_prompt,
+                    language=language,
+                    first_turn=first_turn,
+                )
                 runtime_messages = self._build_chat_runtime_messages(session, memory)
+                if goal_prompt.strip() and goal_prompt.strip() != normalized_prompt.strip():
+                    if runtime_messages and runtime_messages[0].get("role") == "system":
+                        runtime_messages = [runtime_messages[0], {"role": "system", "content": goal_prompt}, *runtime_messages[1:]]
+                    else:
+                        runtime_messages.insert(0, {"role": "system", "content": goal_prompt})
 
                 try:
                     with Spinner("Consultando Omni Agent...", color=C.PRIMARY) as spinner:
@@ -2525,6 +2592,91 @@ class OmniCore:
                 if not action:
                     break
 
+                if action.get("type") == "search":
+                    query = str(action.get("query", "")).strip() or normalized_prompt
+                    render_action_summary(
+                        str(action.get("title", "Búsqueda web")),
+                        [
+                            f"Provider: {self.configured_search_provider()}",
+                            f"Query: {query}",
+                            "Omni pedirá o reutilizará tu Brave Search API key antes de consultar la web.",
+                        ],
+                        accent=C.YLW,
+                    )
+                    confirm = bool(action.get("confirm", True))
+                    should_run = accept_all or self.confirm_step("¿Ejecuto esta búsqueda web ahora?", default=not confirm)
+                    if not should_run:
+                        warn("Búsqueda sugerida, pero no ejecutada.")
+                        break
+                    api_key = self.ensure_brave_search_key(prompt_if_missing=True)
+                    if not api_key:
+                        render_human_error(
+                            "No tengo una Brave Search API key para buscar en la web.",
+                            suggestion="Configúrala con `omni config brave-search` o pégala cuando Omni la pida.",
+                        )
+                        break
+                    try:
+                        with Spinner("Buscando en Brave Search...", color=C.PRIMARY) as spinner:
+                            search_payload = brave_search(query, api_key)
+                            spinner.finish("Resultados recibidos", success=True)
+                    except Exception as err:
+                        render_human_error(
+                            f"La búsqueda web falló: {err}",
+                            suggestion="Revisa tu Brave Search API key o vuelve a intentar con una consulta más específica.",
+                        )
+                        break
+                    search_lines = summarize_brave_results(search_payload.get("payload") or {})
+                    render_action_summary(
+                        "Resultados web",
+                        search_lines[:12] or ["Sin resultados útiles."],
+                        accent=C.GRN,
+                    )
+                    session["messages"].append(
+                        {"role": "user", "content": "Resultados de búsqueda web:\n" + "\n".join(search_lines[:12] or ["Sin resultados útiles."])}
+                    )
+                    memory = record_chat_turn(
+                        memory,
+                        user_prompt=f"search:{query}",
+                        assistant_text="\n".join(search_lines[:6]),
+                        action=action,
+                    )
+                    save_chat_session(session_path, session)
+                    save_chat_memory(memory_path, memory)
+                    auto_steps += 1
+                    if auto_steps >= 4:
+                        hint("Límite de pasos automáticos alcanzado. Escribe `continúa` si quieres que siga operando.")
+                        break
+                    continue
+
+                if action.get("type") == "launch":
+                    runtime = str(action.get("runtime", "")).strip()
+                    raw_args = action.get("args") or []
+                    launch_args = raw_args if isinstance(raw_args, list) else [str(raw_args)]
+                    render_action_summary(
+                        str(action.get("title", "Abrir runtime local")),
+                        [
+                            f"Runtime: {runtime}",
+                            f"Args: {' '.join(str(item) for item in launch_args) or '(sin argumentos)'}",
+                            "Omni abrirá el CLI local si está instalado en este host.",
+                        ],
+                        accent=C.YLW,
+                    )
+                    confirm = bool(action.get("confirm", True))
+                    should_run = accept_all or self.confirm_step("¿Abro este runtime local ahora?", default=not confirm)
+                    if not should_run:
+                        warn("Runtime sugerido, pero no abierto.")
+                        break
+                    returncode = self.launch_agent_runtime(runtime, [str(item) for item in launch_args])
+                    session["messages"].append(
+                        {"role": "user", "content": f"Resultado de runtime local `{runtime}`: exit_code={returncode}"}
+                    )
+                    save_chat_session(session_path, session)
+                    auto_steps += 1
+                    if auto_steps >= 4:
+                        hint("Límite de pasos automáticos alcanzado. Escribe `continúa` si quieres que siga operando.")
+                        break
+                    continue
+
                 if action.get("type") != "command":
                     render_action_summary(
                         str(action.get("title", "Siguiente paso")),
@@ -2545,7 +2697,7 @@ class OmniCore:
                     accent=C.YLW,
                 )
                 confirm = bool(action.get("confirm", True))
-                should_run = accept_all or not confirm or self.confirm_step("¿Ejecuto este comando ahora?", default=False)
+                should_run = accept_all or self.confirm_step("¿Ejecuto este comando ahora?", default=not confirm)
                 if not should_run:
                     warn("Comando sugerido, pero no ejecutado.")
                     break
@@ -2594,6 +2746,91 @@ class OmniCore:
 
     def save_global_config(self, payload: Dict[str, Any]) -> None:
         save_global_config(GLOBAL_CONFIG_FILE, payload)
+
+    def configured_search_provider(self) -> str:
+        config = self.load_global_config().get("search") or {}
+        return str(config.get("provider") or "brave").strip().lower() or "brave"
+
+    def ensure_brave_search_key(self, *, prompt_if_missing: bool = False) -> str:
+        env_var = "BRAVE_SEARCH_API_KEY"
+        api_key = load_env_value(ENV_FILE, env_var)
+        if api_key:
+            return api_key
+        if prompt_if_missing and self.is_interactive():
+            raw_key = getpass.getpass("Brave Search API key (Enter para cancelar): ").strip()
+            if raw_key:
+                if not self.is_dry_run():
+                    upsert_env_value(ENV_FILE, env_var, raw_key)
+                    config = self.load_global_config()
+                    config["search"] = {
+                        "provider": "brave",
+                        "env_var": env_var,
+                        "configured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                    self.save_global_config(config)
+                os.environ[env_var] = raw_key
+                return raw_key
+        return ""
+
+    def resolve_agent_runtime_status(self, runtime_key: str):
+        aliases = {
+            "claude": "claude-code",
+            "claude-code": "claude-code",
+            "codex": "codex-cli",
+            "codex-cli": "codex-cli",
+            "gemini": "gemini-cli",
+            "gemini-cli": "gemini-cli",
+            "opencode": "opencode-cli",
+            "opencode-cli": "opencode-cli",
+        }
+        target = aliases.get(str(runtime_key or "").strip().lower(), str(runtime_key or "").strip().lower())
+        for status in detect_agent_runtimes(AGENT_SKILL_DIR):
+            if status.key == target:
+                return status
+        return None
+
+    def launch_agent_runtime(self, runtime_key: str, argv: List[str] | None = None) -> int:
+        status = self.resolve_agent_runtime_status(runtime_key)
+        if not status:
+            render_human_error(
+                f"No reconozco el runtime `{runtime_key}`.",
+                suggestion="Usa `omni codex`, `omni claude`, `omni gemini` u `omni opencode`.",
+            )
+            return 1
+        if not status.installed:
+            render_human_error(
+                f"{status.title} no está instalado en este host.",
+                suggestion=status.install_hint,
+            )
+            return 1
+
+        args = list(argv or [])
+        render_command_header(
+            status.title,
+            "Launching local agent runtime",
+            dry_run=self.is_dry_run(),
+            snapshot=self.host_snapshot,
+        )
+        render_action_summary(
+            "Runtime Launch",
+            [
+                f"Runtime: {status.title}",
+                f"Command: {status.command} {' '.join(args)}".strip(),
+                f"Path: {status.path}",
+            ],
+            accent=C.PRIMARY,
+        )
+        if self.is_dry_run():
+            warn("Dry run activo: no abrí el runtime local.")
+            return 0
+
+        result = subprocess.run([status.path or status.command, *args], cwd=str(Path.cwd()), check=False)
+        if result.returncode != 0:
+            render_human_error(
+                f"{status.title} terminó con código {result.returncode}.",
+                suggestion="Revisa la configuración del runtime local o vuelve a abrirlo con más contexto.",
+            )
+        return int(result.returncode)
 
     def build_briefcase_export(
         self,
@@ -2850,7 +3087,9 @@ class OmniCore:
         bullet("Configurar Omni Agent  -> omni agent", C.GRN)
         dim("Selector visual para Claude, GPT, Gemini, Mistral, Ollama o endpoint compatible.")
         bullet("Hablar con Omni Agent  -> omni chat \"resume el host\"", C.GRN)
-        dim("Puede ejecutar comandos `omni`, explicar salida y proponer el siguiente paso.")
+        dim("Puede inspeccionar el host, ejecutar comandos seguros y pedir confirmación antes de actuar.")
+        bullet("Abrir Codex / Claude / Gemini  -> omni codex | omni claude | omni gemini", C.GRN)
+        dim("Omni abre el CLI local del agente si está instalado y te deja trabajar desde la misma terminal.")
         bullet("Abrir el launchpad operativo  -> omni guide", C.GRN)
         dim("Menú con flechas, ETA y acceso a SSH Connect / Maleta / Restore / Agent.")
         bullet("Retomar el último paso  -> omni continue", C.GRN)
@@ -2878,7 +3117,11 @@ class OmniCore:
         dim("    Guarda la maleta y el restore script en ~/.omni/exports aunque no pases --output.")
         bullet("omni restore-plan - Derive the target-side restore sequence", C.GRN)
         bullet("omni migrate sync - Use the new migration family around the briefcase contract", C.GRN)
-        bullet("omni chat      - Talk to Omni Agent and let it run safe `omni` actions", C.GRN)
+        bullet("omni chat      - Talk to Omni Agent and let it inspect + operate the host", C.GRN)
+        bullet("omni codex     - Open local Codex CLI if installed", C.GRN)
+        bullet("omni claude    - Open local Claude Code if installed", C.GRN)
+        bullet("omni gemini    - Open local Gemini CLI if installed", C.GRN)
+        bullet("omni opencode  - Open local OpenCode CLI if installed", C.GRN)
         bullet("omni auth github - Save GitHub auth for private briefcase sync", C.GRN)
         bullet("omni push      - Push the latest briefcase to the private GitHub repo", C.GRN)
         bullet("omni pull      - Pull the latest briefcase from GitHub on a new host", C.GRN)
@@ -2912,6 +3155,10 @@ class OmniCore:
         bullet("omni rewrite-ip - Rewrite old host references safely", C.PRIMARY)
         bullet("omni agent     - Configure Omni Agent provider and model", C.PRIMARY)
         bullet("omni chat      - Run the conversational agent surface", C.PRIMARY)
+        bullet("omni codex     - Pass through to local Codex CLI", C.PRIMARY)
+        bullet("omni claude    - Pass through to local Claude Code CLI", C.PRIMARY)
+        bullet("omni gemini    - Pass through to local Gemini CLI", C.PRIMARY)
+        bullet("omni opencode  - Pass through to local OpenCode CLI", C.PRIMARY)
         bullet("omni auth      - Configure GitHub auth for push/pull", C.PRIMARY)
         bullet("omni push      - Upload briefcase + restore script to GitHub", C.PRIMARY)
         bullet("omni pull      - Download latest GitHub briefcase locally", C.PRIMARY)
@@ -5074,6 +5321,13 @@ logging.basicConfig(
 logger = logging.getLogger("omni.core")
 
 def main():
+    raw_argv = sys.argv[1:]
+    raw_action = str(raw_argv[0] if raw_argv else "start").strip().lower()
+    normalized_raw_action = ALIASES.get(raw_action, raw_action)
+    if normalized_raw_action in LOCAL_AGENT_LAUNCH_ACTIONS:
+        core = OmniCore()
+        raise SystemExit(core.launch_agent_runtime(LOCAL_AGENT_LAUNCH_ACTIONS[normalized_raw_action], raw_argv[1:]))
+
     parser = argparse.ArgumentParser(description="OmniSync - Portable migration CLI", add_help=False)
     parser.add_argument("action", nargs="?", default="start", help="Action to perform")
     parser.add_argument("--interval", type=int, default=300, help="Interval for watch mode (seconds)")
@@ -5292,6 +5546,8 @@ def main():
         elif action == "agent":
             agent_action = remaining[0] if remaining else ""
             core.agent_cmd(agent_action, accept_all=should_accept_all(args.accept_all, args.yes, env=os.environ))
+        elif action in LOCAL_AGENT_LAUNCH_ACTIONS:
+            raise SystemExit(core.launch_agent_runtime(LOCAL_AGENT_LAUNCH_ACTIONS[action], remaining))
         elif action == "bridge":
             bridge_action = remaining[0] if remaining else ""
             if bridge_action in {"create", ""}:

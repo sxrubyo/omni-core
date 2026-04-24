@@ -79,7 +79,8 @@ During install, OmniSync also detects Codex, Claude Code, Gemini CLI and OpenCod
 | `omni restore` | Restore from briefcase + secrets on a new machine |
 | `omni migrate` | Full migration — restore + rewrite host references |
 | `omni agent` | Configure Claude, GPT-4, Gemini, Mistral or Ollama |
-| `omni chat` | Talk to the AI agent, run omni commands by voice |
+| `omni chat` | Talk to the AI agent, let it inspect the host and execute guided steps |
+| `omni codex` / `omni claude` / `omni gemini` | Open the local agent CLI already installed on the machine |
 | `omni auth github` | Save GitHub credentials to `~/.omni/config.json` |
 | `omni push` | Push briefcase to a private GitHub repo |
 | `omni pull` | Pull latest briefcase from GitHub on a new machine |
@@ -125,10 +126,14 @@ OmniSync ships with built-in bridges for the major AI coding agents:
 
 ```bash
 omni agent          # select provider + model
-omni chat           # talk to agent, run omni commands
+omni chat           # talk to agent, inspect host, confirm steps
+omni codex          # launch local Codex CLI if present
+omni claude         # launch local Claude Code CLI if present
+omni gemini         # launch local Gemini CLI if present
 ```
 
 Supported providers: **Claude**, **GPT-4**, **Gemini**, **Mistral**, **Ollama** (local), any OpenAI-compatible endpoint.
+Optional web research: configure **Brave Search** with `omni config brave-search` and Omni Agent can fetch external references when needed.
 
 Skills and command files are pre-configured for:
 - `.codex/skills/omni-sync/SKILL.md`

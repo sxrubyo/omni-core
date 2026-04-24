@@ -13,6 +13,39 @@ from typing import Any, Dict, List, Optional
 
 from permissions_ops import ensure_permissions_state
 
+ENGLISH_HINTS = {
+    "hello",
+    "please",
+    "server",
+    "host",
+    "backup",
+    "migrate",
+    "restore",
+    "everything",
+    "project",
+    "help",
+    "next",
+    "step",
+    "run",
+    "move",
+    "deploy",
+}
+SPANISH_HINTS = {
+    "hola",
+    "servidor",
+    "host",
+    "respaldo",
+    "migrar",
+    "restaurar",
+    "todo",
+    "proyecto",
+    "ayuda",
+    "siguiente",
+    "paso",
+    "ejecuta",
+    "mueve",
+    "despliega",
+}
 
 DEFAULT_ACTIVATION_PROMPT = """Eres Omni Agent, el operador conversacional de OmniSync.
 Tu proveedor principal es el que el usuario eligió en `omni agent`; no lo sustituyas ni lo ocultes.
@@ -30,11 +63,14 @@ Reglas operativas:
 Acciones soportadas:
 - comando terminal: ACTION:{"type":"command","command":"pwd","confirm":false,"title":"Contexto actual"}
 - comando omni: ACTION:{"type":"command","command":"omni doctor","confirm":false,"title":"Diagnóstico Omni"}
+- búsqueda web: ACTION:{"type":"search","query":"Ubuntu 24.04 rsync openssh password authentication","confirm":true,"title":"Buscar referencia externa"}
+- abrir un runtime local: ACTION:{"type":"launch","runtime":"codex-cli","args":["--help"],"confirm":true,"title":"Abrir Codex CLI"}
 - lista de tareas: ACTION:{"type":"todo","title":"Siguiente paso","items":["...","..."]}
 
 Capacidades de terminal:
 - `omni ...` para operar OmniSync
 - comandos seguros de inspección como `pwd`, `ls`, `find`, `cat`, `head`, `tail`, `rg`, `git status`, `git branch`, `git remote -v`, `uname -a`, `whoami`, `hostname`, `df -h`, `du -sh`
+- si el usuario pide research externo, usa búsqueda web solo cuando haya confirmación o una API configurada
 
 No metas Markdown alrededor de ACTION. El texto visible para el usuario debe quedar limpio y separado.
 Si no sabes algo, dilo sin inventar.
@@ -218,6 +254,50 @@ def record_chat_turn(
     return updated
 
 
+def detect_language_preference(text: str, fallback: str = "es") -> str:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return fallback or "es"
+    words = {token for token in re.findall(r"[a-záéíóúñ']+", raw) if token}
+    english = len(words & ENGLISH_HINTS)
+    spanish = len(words & SPANISH_HINTS)
+    if any(marker in raw for marker in ("¿", "¡", "qué", "cómo", "quiero", "necesito", "migrar")):
+        spanish += 2
+    if any(marker in raw for marker in ("how", "what", "want", "need", "please", "backup")):
+        english += 2
+    if english > spanish:
+        return "en"
+    return "es" if spanish >= english else (fallback or "es")
+
+
+def build_operator_goal_prompt(
+    user_prompt: str,
+    *,
+    language: str,
+    first_turn: bool,
+) -> str:
+    prompt = str(user_prompt or "").strip()
+    lang = (language or "es").lower()
+    migration_terms = ("migr", "backup", "restore", "briefcase", "maleta", "server", "host", "ssh", "todo", "everything")
+    needs_migration_operator = first_turn or any(term in prompt.lower() for term in migration_terms)
+    if not needs_migration_operator:
+        return prompt
+
+    if lang == "en":
+        return (
+            "Before asking broad questions, summarize what you already see in this host with concrete values "
+            "(OS, shell, package manager, RAM, disk, visible workspace), then state the next logical step. "
+            "If you can inspect or validate something safely, propose or execute that step with ACTION.\n\n"
+            f"User request: {prompt}"
+        )
+    return (
+        "Antes de hacer preguntas amplias, resume lo que ya ves en este host con datos concretos "
+        "(SO, shell, package manager, RAM, disco, workspace visible) y di cuál es el siguiente paso lógico. "
+        "Si puedes inspeccionar o validar algo de forma segura, propón o ejecuta ese paso con ACTION.\n\n"
+        f"Solicitud del usuario: {prompt}"
+    )
+
+
 def build_chat_memory_prompt(memory: Dict[str, Any]) -> str:
     host = memory.get("host_snapshot") or {}
     workspace = memory.get("workspace_context") or {}
@@ -250,6 +330,7 @@ def build_chat_memory_prompt(memory: Dict[str, Any]) -> str:
         visible_cwd = ", ".join(str(item).strip() for item in workspace.get("cwd_entries", []) if str(item).strip())
         visible_home = ", ".join(str(item).strip() for item in workspace.get("home_entries", []) if str(item).strip())
         inventory_summary = ", ".join(str(item).strip() for item in workspace.get("inventory_summary", []) if str(item).strip())
+        runtimes = ", ".join(str(item).strip() for item in workspace.get("agent_runtimes", []) if str(item).strip())
         if cwd:
             prompt_lines.append(f"Directorio actual: {cwd}")
         if omni_home:
@@ -260,6 +341,8 @@ def build_chat_memory_prompt(memory: Dict[str, Any]) -> str:
             prompt_lines.append(f"Entradas visibles en home: {visible_home}")
         if inventory_summary:
             prompt_lines.append(f"Inventario instalado conocido: {inventory_summary}")
+        if runtimes:
+            prompt_lines.append(f"Runtimes de agentes detectados: {runtimes}")
     recent_prompts = list(memory.get("recent_prompts") or [])[-3:]
     if recent_prompts:
         prompt_lines.append("Últimos turnos:")
